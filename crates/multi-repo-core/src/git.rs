@@ -55,7 +55,7 @@ pub(crate) fn sync_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitS
     }
 
     let detected_default_branch = default_branch(repo)?;
-    let dirty = !git_stdout(&repo.local_path, ["status", "--porcelain=v1"])?.is_empty();
+    let dirty = !working_tree_is_clean(&repo.local_path)?;
     let branch = git_optional_stdout(
         &repo.local_path,
         ["symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -122,6 +122,38 @@ pub(crate) fn sync_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitS
     } else {
         Err(command_error(&repo.local_path, &ancestor))
     }
+}
+
+pub(crate) fn working_tree_is_clean(path: &Path) -> Result<bool> {
+    if !path.join(".git").exists() {
+        return Err(Error::Git(format!(
+            "{} is not a Git working tree",
+            path.display()
+        )));
+    }
+    Ok(git_stdout(
+        path,
+        ["status", "--porcelain=v1", "--untracked-files=normal"],
+    )?
+    .is_empty())
+}
+
+pub(crate) fn has_local_git_state(path: &Path) -> Result<bool> {
+    if !git_stdout(path, ["stash", "list", "--format=%gd"])?.is_empty() {
+        return Ok(true);
+    }
+    if git_stdout(
+        path,
+        ["rev-list", "--count", "--branches", "--not", "--remotes"],
+    )? != "0"
+    {
+        return Ok(true);
+    }
+    let worktrees = git_stdout(path, ["worktree", "list", "--porcelain"])?
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .count();
+    Ok(worktrees > 1)
 }
 
 fn clone_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitSyncResult> {

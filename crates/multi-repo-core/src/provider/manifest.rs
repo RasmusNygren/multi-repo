@@ -1,10 +1,9 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use super::{canonicalize_remote, tags};
-use crate::config::{ManifestConfig, validate_repo_name};
+use super::repository_specs;
+use crate::config::{ManifestConfig, RepositoryConfig, resolve_repository_url};
 use crate::error::{Error, Result};
 use crate::model::RepoSpec;
 
@@ -28,33 +27,27 @@ impl ManifestSource {
             path: self.path.clone(),
             source,
         })?;
-        let manifest: Manifest = toml::from_str(&contents)?;
+        let mut manifest: Manifest = toml::from_str(&contents)?;
         if manifest.version != 1 {
             return Err(Error::Config(format!(
                 "unsupported manifest version {}; expected 1",
                 manifest.version
             )));
         }
-        let mut ids = HashSet::new();
-        let mut repos = Vec::with_capacity(manifest.repos.len());
-        for repo in manifest.repos {
-            validate_repo_name(&repo.id)?;
-            if !ids.insert(repo.id.clone()) {
-                return Err(Error::Config(format!(
-                    "duplicate repository id {:?} in {}",
-                    repo.id,
-                    self.path.display()
-                )));
-            }
-            repos.push(RepoSpec {
-                id: format!("{}/{}", self.name, repo.id),
-                canonical_url: canonicalize_remote(&repo.url)?,
-                clone_url: repo.url,
-                default_branch: repo.default_branch,
-                tags: tags(&self.default_tags, &repo.tags),
-            });
+        let base = self
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        for repository in &mut manifest.repos {
+            repository.url = resolve_repository_url(base, &repository.url)?;
         }
-        Ok(repos)
+        let context = self.path.display().to_string();
+        repository_specs(
+            Some(&self.name),
+            &manifest.repos,
+            &self.default_tags,
+            &context,
+        )
     }
 }
 
@@ -62,16 +55,44 @@ impl ManifestSource {
 #[serde(deny_unknown_fields)]
 struct Manifest {
     version: u32,
-    #[serde(default)]
-    repos: Vec<ManifestRepo>,
+    #[serde(default, rename = "repo")]
+    repos: Vec<RepositoryConfig>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ManifestRepo {
-    id: String,
-    url: String,
-    default_branch: Option<String>,
-    #[serde(default)]
-    tags: Vec<String>,
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn discovers_external_manifest_relative_to_its_file() {
+        let temp = TempDir::new().unwrap();
+        let directory = temp.path().join("catalog");
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("repos.toml");
+        std::fs::write(
+            &path,
+            "version = 1\n\n[[repo]]\nid = \"acme/widget\"\nurl = \"../widget.git\"\ntags = [\"specific\"]\n",
+        )
+        .unwrap();
+        let source = ManifestSource::new(&ManifestConfig {
+            name: "generated".into(),
+            path,
+            tags: vec!["default".into()],
+        });
+
+        let repositories = source.discover().unwrap();
+
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].id, "generated/acme/widget");
+        assert_eq!(
+            repositories[0].clone_url,
+            directory.join("../widget.git").to_string_lossy()
+        );
+        assert_eq!(
+            repositories[0].tags,
+            ["default".to_owned(), "specific".to_owned()].into()
+        );
+    }
 }

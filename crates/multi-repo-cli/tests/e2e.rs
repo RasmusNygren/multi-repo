@@ -5,8 +5,11 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 #[test]
-fn manifest_sync_list_and_working_tree_search() {
+fn inline_repository_sync_list_and_working_tree_search() {
     let temp = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    let nested = workspace.join("nested/directory");
+    fs::create_dir_all(&nested).unwrap();
     let remote = temp.path().join("remote.git");
     let seed = temp.path().join("seed");
     git(
@@ -23,57 +26,53 @@ fn manifest_sync_list_and_working_tree_search() {
     git(&seed, ["remote", "add", "origin", text(&remote)]);
     git(&seed, ["push", "-u", "origin", "main"]);
 
-    let manifest = temp.path().join("repos.toml");
+    let config = workspace.join(".multi-repo.toml");
     fs::write(
-        &manifest,
+        &config,
         format!(
-            "version = 1\n\n[[repos]]\nid = \"acme/repo\"\nurl = {:?}\ndefault_branch = \"main\"\ntags = [\"test\"]\n",
+            "version = 1\n\n[[repo]]\nid = \"acme/repo\"\nurl = {:?}\ndefault_branch = \"main\"\ntags = [\"test\"]\n",
             text(&remote)
         ),
     )
     .unwrap();
-    let config = temp.path().join("config.toml");
-    fs::write(
-        &config,
-        format!(
-            "version = 1\nroot = {:?}\n\n[[sources]]\nname = \"manual\"\nkind = \"manifest\"\npath = {:?}\n",
-            text(&temp.path().join("managed")),
-            text(&manifest)
-        ),
-    )
-    .unwrap();
 
-    let dry_run = command(&config, ["sync", "--dry-run"]);
+    let dry_run = command(&nested, ["sync", "--dry-run"]);
     assert_success(&dry_run);
-    assert!(!temp.path().join("managed").exists());
+    let dry_run_stdout = String::from_utf8_lossy(&dry_run.stdout);
+    assert!(dry_run_stdout.contains("source workspace: 1 repository"));
+    assert!(dry_run_stdout.contains("  + acme/repo"));
+    assert!(!workspace.join(".multi-repo").exists());
 
-    let sync = command(&config, ["sync"]);
+    let sync = command(&nested, ["sync"]);
     assert_success(&sync);
-    assert!(String::from_utf8_lossy(&sync.stdout).contains("manual/acme/repo: cloned"));
+    assert!(String::from_utf8_lossy(&sync.stdout).contains("acme/repo: cloned"));
 
-    let list = command(&config, ["list", "--tag", "test"]);
+    let unchanged = command(&nested, ["sync", "--dry-run"]);
+    assert_success(&unchanged);
+    let unchanged_stdout = String::from_utf8_lossy(&unchanged.stdout);
+    assert!(unchanged_stdout.contains("repository changes: none"));
+    assert!(!unchanged_stdout.contains("unchanged"));
+
+    let list = command(&nested, ["list", "--tag", "test", "--source", "workspace"]);
     assert_success(&list);
-    assert!(String::from_utf8_lossy(&list.stdout).contains("manual/acme/repo"));
+    assert!(String::from_utf8_lossy(&list.stdout).contains("acme/repo"));
 
-    let checkout = temp.path().join("managed/repos/manual/acme/repo");
+    let checkout = workspace.join("repos/acme/repo");
     fs::write(checkout.join("local.txt"), "needle from untracked\n").unwrap();
     fs::create_dir(checkout.join("ignored")).unwrap();
     fs::write(checkout.join("ignored/no.txt"), "needle ignored\n").unwrap();
-    let grep = command(&config, ["grep", "-F", "needle", "--sort-path"]);
+    let grep = command(&nested, ["grep", "-F", "needle", "--sort-path"]);
     assert_success(&grep);
     let stdout = String::from_utf8_lossy(&grep.stdout);
-    assert!(stdout.contains("manual/acme/repo:README.md:1:1:needle from remote"));
-    assert!(stdout.contains("manual/acme/repo:local.txt:1:1:needle from untracked"));
+    assert!(stdout.contains("acme/repo:README.md:1:1:needle from remote"));
+    assert!(stdout.contains("acme/repo:local.txt:1:1:needle from untracked"));
     assert!(!stdout.contains("ignored/no.txt"));
 
-    let repos = command(&config, ["grep", "needle", "--repos-with-matches"]);
+    let repos = command(&nested, ["grep", "needle", "--repos-with-matches"]);
     assert_success(&repos);
-    assert_eq!(
-        String::from_utf8_lossy(&repos.stdout).trim(),
-        "manual/acme/repo"
-    );
+    assert_eq!(String::from_utf8_lossy(&repos.stdout).trim(), "acme/repo");
 
-    let json_output = command(&config, ["grep", "-F", "needle", "--json"]);
+    let json_output = command(&nested, ["grep", "-F", "needle", "--json"]);
     assert_success(&json_output);
     let events = String::from_utf8(json_output.stdout)
         .unwrap()
@@ -82,25 +81,72 @@ fn manifest_sync_list_and_working_tree_search() {
         .collect::<Vec<_>>();
     assert_eq!(events.len(), 2);
     assert!(events.iter().all(|event| event["type"] == "match"));
-    assert!(
-        events
-            .iter()
-            .all(|event| event["repo"] == "manual/acme/repo")
-    );
+    assert!(events.iter().all(|event| event["repo"] == "acme/repo"));
 
-    let no_match = command(&config, ["grep", "absent-literal"]);
+    let no_match = command(&nested, ["grep", "absent-literal"]);
     assert_eq!(no_match.status.code(), Some(1));
     assert!(no_match.stdout.is_empty());
+
+    assert_prune_behavior(&workspace, &nested, &config, &checkout);
 }
 
-fn command<I, S>(config: &Path, args: I) -> Output
+fn assert_prune_behavior(workspace: &Path, nested: &Path, config: &Path, checkout: &Path) {
+    let orphan = workspace.join("repos/github/IOOPM-UU");
+    fs::create_dir_all(&orphan).unwrap();
+    assert_success(&command(nested, ["prune"]));
+    assert!(!orphan.exists());
+    assert!(checkout.exists());
+
+    fs::write(config, "version = 1\n").unwrap();
+    let dry_sync = command(nested, ["sync", "--dry-run"]);
+    assert_success(&dry_sync);
+    assert!(String::from_utf8_lossy(&dry_sync.stdout).contains("  - acme/repo"));
+    assert!(String::from_utf8_lossy(&command(nested, ["list"]).stdout).contains("acme/repo"));
+    assert_success(&command(nested, ["sync"]));
+    assert!(command(nested, ["list"]).stdout.is_empty());
+    let inactive = command(nested, ["list", "--all"]);
+    assert_success(&inactive);
+    assert!(String::from_utf8_lossy(&inactive.stdout).contains("acme/repo (inactive)"));
+
+    let dirty_prune = command(nested, ["prune"]);
+    assert_success(&dirty_prune);
+    assert!(
+        String::from_utf8_lossy(&dirty_prune.stdout).contains("working tree has local changes")
+    );
+    assert!(checkout.exists());
+
+    fs::remove_file(checkout.join("local.txt")).unwrap();
+    fs::write(checkout.join("README.md"), "local committed work\n").unwrap();
+    git(checkout, ["config", "user.name", "Test"]);
+    git(checkout, ["config", "user.email", "test@example.com"]);
+    git(checkout, ["add", "README.md"]);
+    git(checkout, ["commit", "-m", "local work"]);
+    let local_state_prune = command(nested, ["prune"]);
+    assert_success(&local_state_prune);
+    assert!(String::from_utf8_lossy(&local_state_prune.stdout).contains("local commits"));
+    assert!(checkout.exists());
+
+    git(checkout, ["reset", "--hard", "origin/main"]);
+    let dry_prune = command(nested, ["prune", "--dry-run"]);
+    assert_success(&dry_prune);
+    assert!(String::from_utf8_lossy(&dry_prune.stdout).contains("acme/repo: would delete"));
+    assert!(checkout.exists());
+
+    let prune = command(nested, ["prune"]);
+    assert_success(&prune);
+    assert!(String::from_utf8_lossy(&prune.stdout).contains("acme/repo: deleted"));
+    assert!(!checkout.exists());
+    assert!(!workspace.join("repos").exists());
+    assert!(command(nested, ["list", "--all"]).stdout.is_empty());
+}
+
+fn command<I, S>(directory: &Path, args: I) -> Output
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
     Command::new(env!("CARGO_BIN_EXE_multi-repo"))
-        .arg("--config")
-        .arg(config)
+        .current_dir(directory)
         .args(args)
         .output()
         .unwrap()

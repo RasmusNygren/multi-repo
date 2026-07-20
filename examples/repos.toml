@@ -1,8 +1,7 @@
 version = 1
 
-[[repos]]
+[[repo]]
 id = "acme/widget"
 url = "git@github.com:acme/widget.git"
 default_branch = "main"
 tags = ["rust", "service"]
-

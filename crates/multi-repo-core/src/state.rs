@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 use crate::config::validate_repo_name;
 use crate::error::{Error, Result};
@@ -62,6 +62,25 @@ impl State {
             )));
         }
         Ok(state)
+    }
+
+    pub(crate) fn list_existing(state_dir: &Path) -> Result<Vec<RepoRecord>> {
+        let path = state_dir.join("state.sqlite3");
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(source) => return Err(Error::Read { path, source }),
+        }
+        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version != SCHEMA_VERSION {
+            return Err(Error::Config(format!(
+                "unsupported state schema {version}; expected {SCHEMA_VERSION}"
+            )));
+        }
+        list_repositories(&connection, true)
     }
 
     /// Reconciles one successful source discovery with the stored inventory.
@@ -176,6 +195,18 @@ impl State {
         Ok(())
     }
 
+    pub(crate) fn remove_inactive(&self, id: &str) -> Result<()> {
+        let connection = self.connect()?;
+        let removed = connection.execute("DELETE FROM repos WHERE id = ?1 AND active = 0", [id])?;
+        if removed == 1 {
+            Ok(())
+        } else {
+            Err(Error::Task(format!(
+                "repository {id:?} is no longer inactive"
+            )))
+        }
+    }
+
     /// Lists repositories and their active source associations in ID order.
     ///
     /// # Errors
@@ -184,44 +215,7 @@ impl State {
     /// cannot be decoded.
     pub fn list(&self, include_inactive: bool) -> Result<Vec<RepoRecord>> {
         let connection = self.connect()?;
-        let sql = if include_inactive {
-            "SELECT id, canonical_url, clone_url, local_path, default_branch,
-                    active, status, last_error
-             FROM repos ORDER BY id"
-        } else {
-            "SELECT id, canonical_url, clone_url, local_path, default_branch,
-                    active, status, last_error
-             FROM repos WHERE active = 1 ORDER BY id"
-        };
-        let mut records = {
-            let mut statement = connection.prepare(sql)?;
-            statement
-                .query_map([], repo_from_row)?
-                .map(|result| result.map(|repo| (repo.id.clone(), repo)))
-                .collect::<std::result::Result<BTreeMap<_, _>, _>>()?
-        };
-        let mut statement = connection.prepare(
-            "SELECT repo_id, source, tags_json FROM repo_sources
-             WHERE active = 1 ORDER BY repo_id, source",
-        )?;
-        let associations = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        for association in associations {
-            let (repo_id, source, tags) = association?;
-            let Some(record) = records.get_mut(&repo_id) else {
-                continue;
-            };
-            record.sources.insert(source);
-            record
-                .tags
-                .extend(serde_json::from_str::<BTreeSet<String>>(&tags)?);
-        }
-        Ok(records.into_values().collect())
+        list_repositories(&connection, include_inactive)
     }
 
     /// Lists active, ready repositories whose working trees still exist.
@@ -252,6 +246,47 @@ impl State {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(connection)
     }
+}
+
+fn list_repositories(connection: &Connection, include_inactive: bool) -> Result<Vec<RepoRecord>> {
+    let sql = if include_inactive {
+        "SELECT id, canonical_url, clone_url, local_path, default_branch,
+                active, status, last_error
+         FROM repos ORDER BY id"
+    } else {
+        "SELECT id, canonical_url, clone_url, local_path, default_branch,
+                active, status, last_error
+         FROM repos WHERE active = 1 ORDER BY id"
+    };
+    let mut records = {
+        let mut statement = connection.prepare(sql)?;
+        statement
+            .query_map([], repo_from_row)?
+            .map(|result| result.map(|repo| (repo.id.clone(), repo)))
+            .collect::<std::result::Result<BTreeMap<_, _>, _>>()?
+    };
+    let mut statement = connection.prepare(
+        "SELECT repo_id, source, tags_json FROM repo_sources
+         WHERE active = 1 ORDER BY repo_id, source",
+    )?;
+    let associations = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for association in associations {
+        let (repo_id, source, tags) = association?;
+        let Some(record) = records.get_mut(&repo_id) else {
+            continue;
+        };
+        record.sources.insert(source);
+        record
+            .tags
+            .extend(serde_json::from_str::<BTreeSet<String>>(&tags)?);
+    }
+    Ok(records.into_values().collect())
 }
 
 fn repo_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoRecord> {
@@ -358,5 +393,26 @@ mod tests {
         assert!(find_record(&state, "one/org/repo").active);
         state.reconcile_source("two", &[], &repos).unwrap();
         assert!(!find_record(&state, "one/org/repo").active);
+    }
+
+    #[test]
+    fn existing_inventory_can_be_read_without_creating_one() {
+        let temp = TempDir::new().unwrap();
+        let state_dir = temp.path().join("state");
+        assert!(State::list_existing(&state_dir).unwrap().is_empty());
+        assert!(!state_dir.exists());
+
+        let state = State::initialize(&state_dir).unwrap();
+        state
+            .reconcile_source(
+                "one",
+                &[spec("one", "org/repo", "host/org/repo")],
+                &temp.path().join("repos"),
+            )
+            .unwrap();
+
+        let records = State::list_existing(&state_dir).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "one/org/repo");
     }
 }

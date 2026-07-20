@@ -1,12 +1,12 @@
-use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions, TryLockError};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use tokio::task::JoinSet;
 
-use crate::config::{Config, SourceConfig};
+use crate::config::{Config, SourceConfig, WORKSPACE_SOURCE_NAME, validate_repo_name};
 use crate::error::{Error, Result};
 use crate::git::{GitSyncResult, SyncAction, sync_repo};
+use crate::lock::acquire_workspace_lock;
 use crate::model::{RepoRecord, RepoSpec, RepoStatus};
 use crate::provider;
 use crate::state::State;
@@ -21,6 +21,31 @@ pub struct SyncOptions {
 pub struct SyncReport {
     pub sources: Vec<SourceReport>,
     pub repos: Vec<RepoSyncReport>,
+    pub preview: Option<SyncPreview>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SyncProgress {
+    Discovering { completed: usize, total: usize },
+    Repositories { completed: usize, total: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepositoryChangeKind {
+    Activate,
+    Deactivate,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct RepositoryChange {
+    pub id: String,
+    pub kind: RepositoryChangeKind,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct SyncPreview {
+    pub changes: Vec<RepositoryChange>,
+    pub unchanged: usize,
 }
 
 #[derive(Debug)]
@@ -56,26 +81,61 @@ impl SyncReport {
 /// task scheduling, or inventory reconciliation fails. Individual provider
 /// and Git failures are captured in the returned report.
 pub async fn synchronize(config: &Config, options: SyncOptions) -> Result<SyncReport> {
+    synchronize_with_progress(config, options, |_| {}).await
+}
+
+/// Synchronizes repositories and reports discovery and Git-operation progress.
+///
+/// # Errors
+///
+/// Returns the same errors as [`synchronize`].
+pub async fn synchronize_with_progress(
+    config: &Config,
+    options: SyncOptions,
+    mut progress: impl FnMut(SyncProgress),
+) -> Result<SyncReport> {
     let _lock = if options.dry_run {
         None
     } else {
-        Some(acquire_lock(&config.state_dir().join("sync.lock"))?)
+        Some(acquire_workspace_lock(
+            &config.state_dir().join("sync.lock"),
+        )?)
     };
 
+    let discovery_total = config.sources.len() + usize::from(!config.repositories.is_empty());
+    let mut discovery_completed = 0;
+    progress(SyncProgress::Discovering {
+        completed: discovery_completed,
+        total: discovery_total,
+    });
     let mut discovery_tasks = JoinSet::new();
     for source_config in &config.sources {
         discovery_tasks.spawn(discover_source(source_config.clone()));
     }
-    let mut discoveries = Vec::with_capacity(config.sources.len());
+    let mut discoveries =
+        Vec::with_capacity(config.sources.len() + usize::from(!config.repositories.is_empty()));
+    if !config.repositories.is_empty() {
+        discoveries.push((
+            WORKSPACE_SOURCE_NAME.to_owned(),
+            provider::discover_repositories(&config.repositories),
+        ));
+        discovery_completed += 1;
+        progress(SyncProgress::Discovering {
+            completed: discovery_completed,
+            total: discovery_total,
+        });
+    }
     while let Some(result) = discovery_tasks.join_next().await {
         discoveries.push(result.map_err(|error| Error::Task(error.to_string()))?);
+        discovery_completed += 1;
+        progress(SyncProgress::Discovering {
+            completed: discovery_completed,
+            total: discovery_total,
+        });
     }
 
-    let state = (!options.dry_run)
-        .then(|| State::initialize(&config.state_dir()))
-        .transpose()?;
     let mut report = SyncReport::default();
-    let mut desired = BTreeMap::<String, RepoRecord>::new();
+    let mut successful = Vec::new();
     for (source, result) in discoveries {
         match result {
             Ok(specs) => {
@@ -84,11 +144,7 @@ pub async fn synchronize(config: &Config, options: SyncOptions) -> Result<SyncRe
                     discovered: specs.len(),
                     error: None,
                 });
-                if let Some(state) = &state {
-                    for repo in state.reconcile_source(&source, &specs, &config.repos_dir())? {
-                        desired.insert(repo.id.clone(), repo);
-                    }
-                }
+                successful.push((source, specs));
             }
             Err(error) => report.sources.push(SourceReport {
                 source,
@@ -100,14 +156,26 @@ pub async fn synchronize(config: &Config, options: SyncOptions) -> Result<SyncRe
     report
         .sources
         .sort_by(|left, right| left.source.cmp(&right.source));
+    if config.repositories.is_empty() {
+        successful.push((WORKSPACE_SOURCE_NAME.to_owned(), Vec::new()));
+    }
     if options.dry_run {
+        let current = State::list_existing(&config.state_dir())?;
+        report.preview = Some(preview_reconciliation(&current, &successful)?);
         return Ok(report);
     }
 
-    let Some(state) = state else {
-        return Err(Error::Task("state was not initialized".into()));
-    };
+    let state = State::initialize(&config.state_dir())?;
+    let mut desired = BTreeMap::<String, RepoRecord>::new();
+    for (source, specs) in successful {
+        for repo in state.reconcile_source(&source, &specs, &config.repos_dir())? {
+            desired.insert(repo.id.clone(), repo);
+        }
+    }
     let temporary_root = config.state_dir().join("tmp");
+    let total = desired.len();
+    let mut completed = 0;
+    progress(SyncProgress::Repositories { completed, total });
     let mut pending = desired.into_values();
     let mut sync_tasks = JoinSet::new();
     for repo in pending.by_ref().take(options.jobs.max(1)) {
@@ -117,12 +185,85 @@ pub async fn synchronize(config: &Config, options: SyncOptions) -> Result<SyncRe
         report
             .repos
             .push(result.map_err(|error| Error::Task(error.to_string()))?);
+        completed += 1;
+        progress(SyncProgress::Repositories { completed, total });
         if let Some(repo) = pending.next() {
             spawn_sync_task(&mut sync_tasks, repo, state.clone(), temporary_root.clone());
         }
     }
     report.repos.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(report)
+}
+
+fn preview_reconciliation(
+    current: &[RepoRecord],
+    discoveries: &[(String, Vec<RepoSpec>)],
+) -> Result<SyncPreview> {
+    let current_active = current
+        .iter()
+        .filter(|repo| repo.active)
+        .map(|repo| repo.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut associations = current
+        .iter()
+        .map(|repo| (repo.id.clone(), repo.sources.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut ids_by_url = current
+        .iter()
+        .map(|repo| (repo.canonical_url.clone(), repo.id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut urls_by_id = current
+        .iter()
+        .map(|repo| (repo.id.clone(), repo.canonical_url.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    for (source, specs) in discoveries {
+        for sources in associations.values_mut() {
+            sources.remove(source);
+        }
+        for spec in specs {
+            validate_repo_name(&spec.id)?;
+            let id = if let Some(id) = ids_by_url.get(&spec.canonical_url) {
+                id.clone()
+            } else {
+                if let Some(existing_url) = urls_by_id.get(&spec.id) {
+                    return Err(Error::Config(format!(
+                        "repository id {:?} refers to both {existing_url:?} and {:?}",
+                        spec.id, spec.canonical_url
+                    )));
+                }
+                ids_by_url.insert(spec.canonical_url.clone(), spec.id.clone());
+                urls_by_id.insert(spec.id.clone(), spec.canonical_url.clone());
+                spec.id.clone()
+            };
+            associations.entry(id).or_default().insert(source.clone());
+        }
+    }
+
+    let desired_active = associations
+        .into_iter()
+        .filter_map(|(id, sources)| (!sources.is_empty()).then_some(id))
+        .collect::<BTreeSet<_>>();
+    let mut changes = desired_active
+        .difference(&current_active)
+        .map(|id| RepositoryChange {
+            id: id.clone(),
+            kind: RepositoryChangeKind::Activate,
+        })
+        .chain(
+            current_active
+                .difference(&desired_active)
+                .map(|id| RepositoryChange {
+                    id: id.clone(),
+                    kind: RepositoryChangeKind::Deactivate,
+                }),
+        )
+        .collect::<Vec<_>>();
+    changes.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(SyncPreview {
+        changes,
+        unchanged: current_active.intersection(&desired_active).count(),
+    })
 }
 
 async fn discover_source(source_config: SourceConfig) -> (String, Result<Vec<RepoSpec>>) {
@@ -193,32 +334,76 @@ async fn synchronize_repo(
     }
 }
 
-fn acquire_lock(path: &Path) -> Result<File> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| Error::Write {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|source| Error::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Err(Error::SyncLocked),
-        Err(TryLockError::Error(source)) => {
-            return Err(Error::Write {
-                path: path.to_path_buf(),
-                source,
-            });
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(id: &str, url: &str, active: bool, sources: &[&str]) -> RepoRecord {
+        RepoRecord {
+            id: id.into(),
+            canonical_url: url.into(),
+            clone_url: url.into(),
+            local_path: PathBuf::from("repos").join(id),
+            default_branch: Some("main".into()),
+            active,
+            status: RepoStatus::Ready,
+            sources: sources.iter().map(|source| (*source).to_owned()).collect(),
+            tags: BTreeSet::new(),
+            last_error: None,
         }
     }
-    Ok(file)
+
+    fn spec(id: &str, url: &str) -> RepoSpec {
+        RepoSpec {
+            id: id.into(),
+            canonical_url: url.into(),
+            clone_url: url.into(),
+            default_branch: Some("main".into()),
+            tags: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn preview_reports_activation_deactivation_and_shared_repositories() {
+        let current = vec![
+            record("github/dormant", "host/dormant", false, &[]),
+            record("github/old", "host/old", true, &["github"]),
+            record(
+                "github/shared",
+                "host/shared",
+                true,
+                &["github", "manifest"],
+            ),
+        ];
+        let discoveries = vec![(
+            "github".to_owned(),
+            vec![
+                spec("github/new", "host/new"),
+                spec("github/renamed-dormant", "host/dormant"),
+            ],
+        )];
+
+        let preview = preview_reconciliation(&current, &discoveries).unwrap();
+
+        assert_eq!(
+            preview,
+            SyncPreview {
+                changes: vec![
+                    RepositoryChange {
+                        id: "github/dormant".into(),
+                        kind: RepositoryChangeKind::Activate,
+                    },
+                    RepositoryChange {
+                        id: "github/new".into(),
+                        kind: RepositoryChangeKind::Activate,
+                    },
+                    RepositoryChange {
+                        id: "github/old".into(),
+                        kind: RepositoryChangeKind::Deactivate,
+                    },
+                ],
+                unchanged: 1,
+            }
+        );
+    }
 }

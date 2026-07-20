@@ -1,7 +1,6 @@
 version = 1
-root = "~/src/managed"
 
-[[sources]]
+[[source]]
 name = "github"
 kind = "github"
 api_url = "https://api.github.com"
@@ -10,7 +9,7 @@ clone_protocol = "ssh"
 include_forks = false
 include_archived = false
 
-[[sources]]
+[[source]]
 name = "stash"
 kind = "bitbucket-server"
 base_url = "https://stash.example.com"
@@ -18,8 +17,8 @@ token_env = "BITBUCKET_TOKEN"
 clone_protocol = "ssh"
 projects = ["PLATFORM"]
 
-[[sources]]
-name = "manual"
-kind = "manifest"
-path = "repos.toml"
-
+[[repo]]
+id = "acme/widget"
+url = "git@github.com:acme/widget.git"
+default_branch = "main"
+tags = ["rust", "service"]

@@ -2,13 +2,13 @@ mod bitbucket;
 mod github;
 mod manifest;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 
-use crate::config::SourceConfig;
+use crate::config::{CONFIG_FILE_NAME, RepositoryConfig, SourceConfig, validate_repo_name};
 use crate::error::{Error, Result};
 use crate::model::RepoSpec;
 
@@ -20,6 +20,41 @@ pub(crate) async fn discover(config: &SourceConfig) -> Result<Vec<RepoSpec>> {
         }
         SourceConfig::Manifest(config) => manifest::ManifestSource::new(config).discover(),
     }
+}
+
+pub(crate) fn discover_repositories(repositories: &[RepositoryConfig]) -> Result<Vec<RepoSpec>> {
+    repository_specs(None, repositories, &[], CONFIG_FILE_NAME)
+}
+
+fn repository_specs(
+    source: Option<&str>,
+    repositories: &[RepositoryConfig],
+    default_tags: &[String],
+    context: &str,
+) -> Result<Vec<RepoSpec>> {
+    let mut ids = HashSet::new();
+    let mut specs = Vec::with_capacity(repositories.len());
+    for repository in repositories {
+        validate_repo_name(&repository.id)?;
+        if !ids.insert(&repository.id) {
+            return Err(Error::Config(format!(
+                "duplicate repository id {:?} in {context}",
+                repository.id
+            )));
+        }
+        let id = source.map_or_else(
+            || repository.id.clone(),
+            |source| format!("{source}/{}", repository.id),
+        );
+        specs.push(RepoSpec {
+            id,
+            canonical_url: canonicalize_remote(&repository.url)?,
+            clone_url: repository.url.clone(),
+            default_branch: repository.default_branch.clone(),
+            tags: tags(default_tags, &repository.tags),
+        });
+    }
+    Ok(specs)
 }
 
 struct Filters {

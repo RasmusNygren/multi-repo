@@ -1,9 +1,11 @@
 pub mod config;
+pub mod prune;
 pub mod search;
 pub mod sync;
 
 mod error;
 mod git;
+mod lock;
 mod model;
 mod provider;
 mod state;

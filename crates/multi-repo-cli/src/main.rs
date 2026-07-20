@@ -5,11 +5,14 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use multi_repo_core::prune::{PruneAction, PruneOptions, prune};
 use multi_repo_core::search::{
     CaseMode, MatchEvent, PatternKind, RepoFilter, SearchEvent, SearchOptions, SearchOutputMode,
     search, select_repos,
 };
-use multi_repo_core::sync::{SyncOptions, synchronize};
+use multi_repo_core::sync::{
+    RepositoryChange, RepositoryChangeKind, SyncOptions, SyncProgress, synchronize_with_progress,
+};
 use multi_repo_core::{Config, Error, State, SyncAction};
 use serde_json::{Value, json};
 
@@ -20,7 +23,7 @@ use serde_json::{Value, json};
     about = "Fast, safe multi-repository management"
 )]
 struct Cli {
-    /// Configuration file (defaults to $XDG_CONFIG_HOME/multi-repo/config.toml)
+    /// Override the nearest .multi-repo.toml workspace configuration
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -33,6 +36,8 @@ enum Command {
     Sync(SyncArgs),
     /// List repositories in the local inventory
     List(ListArgs),
+    /// Delete inactive repositories with clean working trees
+    Prune(PruneArgs),
     /// Search all selected repository working trees
     Grep(GrepArgs),
 }
@@ -45,6 +50,9 @@ struct SyncArgs {
     /// Maximum concurrent Git operations
     #[arg(short = 'j', long, default_value_t = default_jobs())]
     jobs: usize,
+    /// Control colored dry-run diff output
+    #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
+    color: ColorChoice,
 }
 
 #[derive(Debug, Args)]
@@ -57,6 +65,13 @@ struct ListArgs {
     /// Emit a JSON array
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PruneArgs {
+    /// Report what would be removed without changing files or state
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -162,26 +177,36 @@ async fn run() -> multi_repo_core::Result<u8> {
     match cli.command {
         Command::Sync(args) => run_sync(&config, &args).await,
         Command::List(args) => run_list(&State::initialize(&config.state_dir())?, &args),
+        Command::Prune(args) => run_prune(&config, &args),
         Command::Grep(args) => run_grep(&State::initialize(&config.state_dir())?, &args),
     }
 }
 
 async fn run_sync(config: &Config, args: &SyncArgs) -> multi_repo_core::Result<u8> {
-    let report = synchronize(
+    let mut progress = SyncProgressDisplay::new();
+    let result = synchronize_with_progress(
         config,
         SyncOptions {
             jobs: args.jobs,
             dry_run: args.dry_run,
         },
+        |event| progress.update(event),
     )
-    .await?;
+    .await;
+    progress.finish();
+    let report = result?;
     for source in &report.sources {
         if let Some(error) = &source.error {
             eprintln!("source {}: {error}", source.source);
         } else {
+            let repository = if source.discovered == 1 {
+                "repository"
+            } else {
+                "repositories"
+            };
             println!(
-                "source {}: {} repositories",
-                source.source, source.discovered
+                "source {}: {} {repository}",
+                source.source, source.discovered,
             );
         }
     }
@@ -203,7 +228,89 @@ async fn run_sync(config: &Config, args: &SyncArgs) -> multi_repo_core::Result<u
             println!("{}: {action}", repo.id);
         }
     }
+    if let Some(preview) = &report.preview {
+        if preview.changes.is_empty() {
+            println!("repository changes: none");
+        } else {
+            println!("repository changes:");
+            let color = match args.color {
+                ColorChoice::Auto => io::stdout().is_terminal(),
+                ColorChoice::Always => true,
+                ColorChoice::Never => false,
+            };
+            for change in &preview.changes {
+                println!("{}", repository_change_line(change, color));
+            }
+            if preview.unchanged > 0 {
+                println!("    {} unchanged", preview.unchanged);
+            }
+        }
+    }
     Ok(if report.failed() { 2 } else { 0 })
+}
+
+fn repository_change_line(change: &RepositoryChange, color: bool) -> String {
+    let (marker, ansi) = match change.kind {
+        RepositoryChangeKind::Activate => ('+', "\x1b[32m"),
+        RepositoryChangeKind::Deactivate => ('-', "\x1b[31m"),
+    };
+    if color {
+        format!("  {ansi}{marker} {}\x1b[0m", change.id)
+    } else {
+        format!("  {marker} {}", change.id)
+    }
+}
+
+struct SyncProgressDisplay {
+    enabled: bool,
+}
+
+impl SyncProgressDisplay {
+    fn new() -> Self {
+        Self {
+            enabled: io::stderr().is_terminal(),
+        }
+    }
+
+    fn update(&mut self, progress: SyncProgress) {
+        if !self.enabled {
+            return;
+        }
+        let mut stderr = io::stderr().lock();
+        if write!(stderr, "\r\x1b[2K{}", progress_line(progress))
+            .and_then(|()| stderr.flush())
+            .is_err()
+        {
+            self.enabled = false;
+        }
+    }
+
+    fn finish(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        let mut stderr = io::stderr().lock();
+        let _ = stderr.write_all(b"\r\x1b[2K").and_then(|()| stderr.flush());
+        self.enabled = false;
+    }
+}
+
+fn progress_line(progress: SyncProgress) -> String {
+    const WIDTH: usize = 12;
+    let (label, completed, total) = match progress {
+        SyncProgress::Discovering { completed, total } => ("discover", completed, total),
+        SyncProgress::Repositories { completed, total } => ("sync", completed, total),
+    };
+    let completed = completed.min(total);
+    let filled = completed
+        .saturating_mul(WIDTH)
+        .checked_div(total)
+        .unwrap_or(0);
+    format!(
+        "{label:<8}[{}{}] {completed}/{total}",
+        "#".repeat(filled),
+        "-".repeat(WIDTH - filled),
+    )
 }
 
 fn run_list(state: &State, args: &ListArgs) -> multi_repo_core::Result<u8> {
@@ -217,6 +324,34 @@ fn run_list(state: &State, args: &ListArgs) -> multi_repo_core::Result<u8> {
         }
     }
     Ok(0)
+}
+
+fn run_prune(config: &Config, args: &PruneArgs) -> multi_repo_core::Result<u8> {
+    let report = prune(
+        config,
+        PruneOptions {
+            dry_run: args.dry_run,
+        },
+    )?;
+    for repo in &report.repos {
+        if let Some(error) = &repo.error {
+            eprintln!("{}: {error}", repo.id);
+            continue;
+        }
+        let action = match repo.action {
+            Some(PruneAction::Deleted) => "deleted",
+            Some(PruneAction::WouldDelete) => "would delete",
+            Some(PruneAction::RemovedMissing) => "removed missing inventory entry",
+            Some(PruneAction::WouldRemoveMissing) => "would remove missing inventory entry",
+            Some(PruneAction::SkippedDirty) => "kept (working tree has local changes)",
+            Some(PruneAction::SkippedLocalState) => {
+                "kept (repository has local commits, stashes, or linked worktrees)"
+            }
+            None => "unknown",
+        };
+        println!("{}: {action}", repo.id);
+    }
+    Ok(if report.failed() { 2 } else { 0 })
 }
 
 fn run_grep(state: &State, args: &GrepArgs) -> multi_repo_core::Result<u8> {
@@ -512,4 +647,49 @@ fn default_jobs() -> usize {
     std::thread::available_parallelism()
         .map_or(4, std::num::NonZero::get)
         .min(8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_lines_are_small_and_bounded() {
+        assert_eq!(
+            progress_line(SyncProgress::Discovering {
+                completed: 1,
+                total: 2,
+            }),
+            "discover[######------] 1/2"
+        );
+        assert_eq!(
+            progress_line(SyncProgress::Repositories {
+                completed: 80,
+                total: 60,
+            }),
+            "sync    [############] 60/60"
+        );
+    }
+
+    #[test]
+    fn repository_changes_use_diff_colors_when_enabled() {
+        let added = RepositoryChange {
+            id: "github/acme/new".into(),
+            kind: RepositoryChangeKind::Activate,
+        };
+        let removed = RepositoryChange {
+            id: "github/acme/old".into(),
+            kind: RepositoryChangeKind::Deactivate,
+        };
+
+        assert_eq!(
+            repository_change_line(&added, true),
+            "  \x1b[32m+ github/acme/new\x1b[0m"
+        );
+        assert_eq!(
+            repository_change_line(&removed, true),
+            "  \x1b[31m- github/acme/old\x1b[0m"
+        );
+        assert_eq!(repository_change_line(&added, false), "  + github/acme/new");
+    }
 }

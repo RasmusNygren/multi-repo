@@ -4,6 +4,8 @@ use std::path::PathBuf;
 pub enum Error {
     #[error("configuration error: {0}")]
     Config(String),
+    #[error("failed to determine the current directory: {0}")]
+    CurrentDir(#[source] std::io::Error),
     #[error("failed to read {path}: {source}")]
     Read {
         path: PathBuf,
@@ -28,8 +30,8 @@ pub enum Error {
     Git(String),
     #[error("search error: {0}")]
     Search(String),
-    #[error("workspace is already being synchronized")]
-    SyncLocked,
+    #[error("workspace is already being modified")]
+    WorkspaceLocked,
     #[error("task failed: {0}")]
     Task(String),
 }
