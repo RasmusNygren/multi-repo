@@ -1,0 +1,25 @@
+version = 1
+root = "~/src/managed"
+
+[[sources]]
+name = "github"
+kind = "github"
+api_url = "https://api.github.com"
+token_env = "GITHUB_TOKEN"
+clone_protocol = "ssh"
+include_forks = false
+include_archived = false
+
+[[sources]]
+name = "stash"
+kind = "bitbucket-server"
+base_url = "https://stash.example.com"
+token_env = "BITBUCKET_TOKEN"
+clone_protocol = "ssh"
+projects = ["PLATFORM"]
+
+[[sources]]
+name = "manual"
+kind = "manifest"
+path = "repos.toml"
+

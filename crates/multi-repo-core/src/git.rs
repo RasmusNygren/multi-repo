@@ -1,0 +1,379 @@
+use std::ffi::OsStr;
+use std::path::Path;
+use std::process::{Command, Output};
+
+use tempfile::Builder;
+
+use crate::error::{Error, Result};
+use crate::model::RepoRecord;
+use crate::provider::canonicalize_remote;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SyncAction {
+    Cloned,
+    FastForwarded,
+    Fetched,
+    Unchanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitSyncResult {
+    pub action: SyncAction,
+    pub detail: Option<String>,
+    pub detected_default_branch: Option<String>,
+}
+
+pub(crate) fn sync_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitSyncResult> {
+    if !repo.local_path.exists() {
+        return clone_repo(repo, temporary_root);
+    }
+    if !repo.local_path.join(".git").exists() {
+        return Err(Error::Git(format!(
+            "{} exists but is not a Git working tree",
+            repo.local_path.display()
+        )));
+    }
+
+    let origin = git_stdout(&repo.local_path, ["remote", "get-url", "origin"])?;
+    if canonicalize_remote(origin.trim())? != repo.canonical_url {
+        return Err(Error::Git(format!(
+            "{} has origin {:?}, expected {:?}",
+            repo.local_path.display(),
+            origin.trim(),
+            repo.clone_url
+        )));
+    }
+
+    if let Some(default_branch) = &repo.default_branch {
+        let refspec = format!("+refs/heads/{default_branch}:refs/remotes/origin/{default_branch}");
+        git_success(
+            &repo.local_path,
+            ["fetch", "--quiet", "--prune", "origin", &refspec],
+        )?;
+    } else {
+        git_success(&repo.local_path, ["fetch", "--quiet", "--prune", "origin"])?;
+    }
+
+    let detected_default_branch = repo
+        .default_branch
+        .clone()
+        .or_else(|| remote_default_branch(&repo.local_path).ok().flatten());
+    let dirty = !git_stdout(&repo.local_path, ["status", "--porcelain=v1"])?.is_empty();
+    let branch = git_optional_stdout(
+        &repo.local_path,
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )?;
+    let Some(default_branch) = detected_default_branch.as_deref() else {
+        return Ok(result(
+            SyncAction::Fetched,
+            Some("default branch is unknown; fetched without updating the worktree".into()),
+            None,
+        ));
+    };
+    let Some(branch) = branch else {
+        return Ok(result(
+            SyncAction::Fetched,
+            Some("detached HEAD; fetched without updating the worktree".into()),
+            Some(default_branch),
+        ));
+    };
+    if branch.trim() != default_branch {
+        return Ok(result(
+            SyncAction::Fetched,
+            Some(format!(
+                "on branch {:?}; fetched without switching to {:?}",
+                branch.trim(),
+                default_branch
+            )),
+            Some(default_branch),
+        ));
+    }
+    if dirty {
+        return Ok(result(
+            SyncAction::Fetched,
+            Some("working tree has local changes; fetched without updating it".into()),
+            Some(default_branch),
+        ));
+    }
+
+    let upstream = format!("origin/{default_branch}");
+    let head = git_stdout(&repo.local_path, ["rev-parse", "HEAD"])?;
+    let remote_head = git_stdout(&repo.local_path, ["rev-parse", upstream.as_str()])?;
+    if head.trim() == remote_head.trim() {
+        return Ok(result(SyncAction::Unchanged, None, Some(default_branch)));
+    }
+    let ancestor = Command::new("git")
+        .arg("-C")
+        .arg(&repo.local_path)
+        .args(["merge-base", "--is-ancestor", "HEAD", upstream.as_str()])
+        .output()
+        .map_err(|error| git_spawn_error(&repo.local_path, &error))?;
+    if ancestor.status.success() {
+        git_success(
+            &repo.local_path,
+            ["merge", "--quiet", "--ff-only", upstream.as_str()],
+        )?;
+        Ok(result(
+            SyncAction::FastForwarded,
+            None,
+            Some(default_branch),
+        ))
+    } else if ancestor.status.code() == Some(1) {
+        Ok(result(
+            SyncAction::Fetched,
+            Some("local default branch has diverged; fetched without updating it".into()),
+            Some(default_branch),
+        ))
+    } else {
+        Err(command_error(&repo.local_path, &ancestor))
+    }
+}
+
+fn clone_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitSyncResult> {
+    std::fs::create_dir_all(temporary_root).map_err(|source| Error::Write {
+        path: temporary_root.to_path_buf(),
+        source,
+    })?;
+    let temporary = Builder::new()
+        .prefix("clone-")
+        .tempdir_in(temporary_root)
+        .map_err(|source| Error::Write {
+            path: temporary_root.to_path_buf(),
+            source,
+        })?;
+
+    let mut command = Command::new("git");
+    command.args(["clone", "--quiet", "--single-branch"]);
+    if let Some(branch) = &repo.default_branch {
+        command.args(["--branch", branch]);
+    }
+    command.arg(&repo.clone_url).arg(temporary.path());
+    let output = command
+        .output()
+        .map_err(|error| git_spawn_error(temporary.path(), &error))?;
+    if !output.status.success() {
+        return Err(command_error(temporary.path(), &output));
+    }
+    if let Some(parent) = repo.local_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| Error::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let temporary = temporary.keep();
+    std::fs::rename(&temporary, &repo.local_path).map_err(|source| Error::Write {
+        path: repo.local_path.clone(),
+        source,
+    })?;
+    let detected_default_branch = repo
+        .default_branch
+        .clone()
+        .or_else(|| remote_default_branch(&repo.local_path).ok().flatten());
+    Ok(GitSyncResult {
+        action: SyncAction::Cloned,
+        detail: None,
+        detected_default_branch,
+    })
+}
+
+fn remote_default_branch(path: &Path) -> Result<Option<String>> {
+    Ok(git_optional_stdout(
+        path,
+        [
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )?
+    .and_then(|reference| reference.strip_prefix("origin/").map(str::to_owned)))
+}
+
+fn result(
+    action: SyncAction,
+    detail: Option<String>,
+    default_branch: Option<&str>,
+) -> GitSyncResult {
+    GitSyncResult {
+        action,
+        detail,
+        detected_default_branch: default_branch.map(str::to_owned),
+    }
+}
+
+fn git_stdout<I, S>(path: &Path, args: I) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .map_err(|error| git_spawn_error(path, &error))?;
+    if !output.status.success() {
+        return Err(command_error(path, &output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn git_optional_stdout<I, S>(path: &Path, args: I) -> Result<Option<String>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .map_err(|error| git_spawn_error(path, &error))?;
+    if output.status.success() {
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        ))
+    } else if output.status.code() == Some(1) {
+        Ok(None)
+    } else {
+        Err(command_error(path, &output))
+    }
+}
+
+fn git_success<I, S>(path: &Path, args: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    git_stdout(path, args).map(drop)
+}
+
+fn git_spawn_error(path: &Path, error: &std::io::Error) -> Error {
+    Error::Git(format!("could not run git in {}: {error}", path.display()))
+}
+
+fn command_error(path: &Path, output: &Output) -> Error {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Error::Git(format!(
+        "git in {} exited with {}: {}",
+        path.display(),
+        output.status,
+        stderr.trim()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::model::RepoStatus;
+
+    #[test]
+    fn clones_fast_forwards_and_preserves_dirty_worktrees() {
+        let temp = TempDir::new().unwrap();
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        run(
+            temp.path(),
+            [
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        run(
+            temp.path(),
+            ["init", "--initial-branch=main", seed.to_str().unwrap()],
+        );
+        run(&seed, ["config", "user.name", "Test"]);
+        run(&seed, ["config", "user.email", "test@example.com"]);
+        fs::write(seed.join("file.txt"), "one\n").unwrap();
+        run(&seed, ["add", "file.txt"]);
+        run(&seed, ["commit", "-m", "initial"]);
+        run(&seed, ["remote", "add", "origin", remote.to_str().unwrap()]);
+        run(&seed, ["push", "-u", "origin", "main"]);
+
+        let checkout = temp.path().join("managed/repo");
+        let repo = RepoRecord {
+            id: "manual/repo".into(),
+            canonical_url: canonicalize_remote(remote.to_str().unwrap()).unwrap(),
+            clone_url: remote.to_string_lossy().into_owned(),
+            local_path: checkout.clone(),
+            default_branch: None,
+            active: true,
+            status: RepoStatus::Pending,
+            sources: BTreeSet::from(["manual".into()]),
+            tags: BTreeSet::new(),
+            last_error: None,
+        };
+        let cloned = sync_repo(&repo, &temp.path().join("tmp")).unwrap();
+        assert_eq!(cloned.action, SyncAction::Cloned);
+        assert_eq!(cloned.detected_default_branch.as_deref(), Some("main"));
+
+        fs::write(seed.join("file.txt"), "two\n").unwrap();
+        run(&seed, ["add", "file.txt"]);
+        run(&seed, ["commit", "-m", "update"]);
+        run(&seed, ["push", "origin", "main"]);
+        fs::write(checkout.join("local.txt"), "do not discard\n").unwrap();
+        let fetched = sync_repo(&repo, &temp.path().join("tmp")).unwrap();
+        assert_eq!(fetched.action, SyncAction::Fetched);
+        assert!(fetched.detail.unwrap().contains("local changes"));
+        assert_eq!(
+            fs::read_to_string(checkout.join("file.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            fs::read_to_string(checkout.join("local.txt")).unwrap(),
+            "do not discard\n"
+        );
+
+        fs::remove_file(checkout.join("local.txt")).unwrap();
+        assert_eq!(
+            sync_repo(&repo, &temp.path().join("tmp")).unwrap().action,
+            SyncAction::FastForwarded
+        );
+        assert_eq!(
+            fs::read_to_string(checkout.join("file.txt")).unwrap(),
+            "two\n"
+        );
+
+        run(&checkout, ["config", "user.name", "Test"]);
+        run(&checkout, ["config", "user.email", "test@example.com"]);
+        fs::write(checkout.join("local-commit.txt"), "local history\n").unwrap();
+        run(&checkout, ["add", "local-commit.txt"]);
+        run(&checkout, ["commit", "-m", "local commit"]);
+        fs::write(seed.join("remote-commit.txt"), "remote history\n").unwrap();
+        run(&seed, ["add", "remote-commit.txt"]);
+        run(&seed, ["commit", "-m", "remote commit"]);
+        run(&seed, ["push", "origin", "main"]);
+
+        let diverged = sync_repo(&repo, &temp.path().join("tmp")).unwrap();
+        assert_eq!(diverged.action, SyncAction::Fetched);
+        assert!(diverged.detail.unwrap().contains("diverged"));
+        assert!(checkout.join("local-commit.txt").exists());
+        assert!(!checkout.join("remote-commit.txt").exists());
+    }
+
+    fn run<I, S>(path: &Path, args: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
