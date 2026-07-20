@@ -3,9 +3,8 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use multi_repo_core::RepoRecord;
-use multi_repo_core::model::RepoStatus;
-use multi_repo_core::search::{SearchEvent, SearchOptions, search};
+use multi_repo_core::search::{PatternKind, SearchEvent, SearchOptions, search};
+use multi_repo_core::{RepoRecord, RepoStatus};
 use tempfile::TempDir;
 
 fn main() -> multi_repo_core::Result<()> {
@@ -38,10 +37,10 @@ fn main() -> multi_repo_core::Result<()> {
         });
     }
 
-    let no_output: Arc<dyn Fn(SearchEvent) + Send + Sync> = Arc::new(drop);
+    let no_output = drop;
     let no_match = SearchOptions {
         pattern: "literal-that-is-not-present".into(),
-        fixed_strings: true,
+        pattern_kind: PatternKind::Fixed,
         ..SearchOptions::default()
     };
     search(&repos, &no_match, &no_output)?;
@@ -56,17 +55,17 @@ fn main() -> multi_repo_core::Result<()> {
     let started = Instant::now();
     let first_output = Arc::new(Mutex::new(None::<Duration>));
     let captured = Arc::clone(&first_output);
-    let output: Arc<dyn Fn(SearchEvent) + Send + Sync> = Arc::new(move |event| {
+    let output = move |event| {
         if matches!(event, SearchEvent::Match(_)) {
             let mut first = captured.lock().expect("first-output lock");
             first.get_or_insert_with(|| started.elapsed());
         }
-    });
+    };
     search(
         &repos,
         &SearchOptions {
             pattern: "needle".into(),
-            fixed_strings: true,
+            pattern_kind: PatternKind::Fixed,
             ..SearchOptions::default()
         },
         &output,

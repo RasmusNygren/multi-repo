@@ -21,12 +21,26 @@ pub enum SearchOutputMode {
     Count,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PatternKind {
+    #[default]
+    Regex,
+    Fixed,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CaseMode {
+    #[default]
+    Sensitive,
+    Insensitive,
+    Smart,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct SearchOptions {
     pub pattern: String,
-    pub fixed_strings: bool,
-    pub ignore_case: bool,
-    pub smart_case: bool,
+    pub pattern_kind: PatternKind,
+    pub case: CaseMode,
     pub word: bool,
     pub before_context: usize,
     pub after_context: usize,
@@ -34,24 +48,6 @@ pub struct SearchOptions {
     pub path_prefixes: Vec<PathBuf>,
     pub threads: usize,
     pub output_mode: SearchOutputMode,
-}
-
-impl Default for SearchOptions {
-    fn default() -> Self {
-        Self {
-            pattern: String::new(),
-            fixed_strings: false,
-            ignore_case: false,
-            smart_case: false,
-            word: false,
-            before_context: 0,
-            after_context: 0,
-            globs: Vec::new(),
-            path_prefixes: Vec::new(),
-            threads: 0,
-            output_mode: SearchOutputMode::Matches,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -105,79 +101,11 @@ pub struct RepoFilter {
     pub tags: HashSet<String>,
 }
 
-pub type FileVisitor = Arc<dyn Fn(&RepoRecord, &Path, &Path) + Send + Sync>;
-pub type FileWalkErrorVisitor = Arc<dyn Fn(Option<PathBuf>, String) + Send + Sync>;
-
-/// Defines the set of files made available to the search engine.
+/// Selects repositories matching every non-empty filter category.
 ///
-/// A future tracked-files implementation can read Git indexes and invoke the
-/// same visitor without changing matching, output, or repository filtering.
-pub trait FileUniverse: Send + Sync {
-    fn visit(
-        &self,
-        repos: &[RepoRecord],
-        threads: usize,
-        visitor: &FileVisitor,
-        error_visitor: &FileWalkErrorVisitor,
-    );
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct WorkingTrees;
-
-impl FileUniverse for WorkingTrees {
-    fn visit(
-        &self,
-        repos: &[RepoRecord],
-        threads: usize,
-        visitor: &FileVisitor,
-        error_visitor: &FileWalkErrorVisitor,
-    ) {
-        let roots: Arc<HashMap<PathBuf, Arc<RepoRecord>>> = Arc::new(
-            repos
-                .iter()
-                .cloned()
-                .map(|repo| (repo.local_path.clone(), Arc::new(repo)))
-                .collect(),
-        );
-        let mut walker = WalkBuilder::empty();
-        for repo in repos {
-            walker.add(&repo.local_path);
-        }
-        walker
-            .hidden(false)
-            .follow_links(false)
-            .require_git(true)
-            .threads(threads)
-            .filter_entry(|entry| entry.file_name() != ".git");
-        walker.build_parallel().run(|| {
-            let roots = Arc::clone(&roots);
-            let visitor = Arc::clone(visitor);
-            let error_visitor = Arc::clone(error_visitor);
-            Box::new(move |entry| {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        error_visitor(None, error.to_string());
-                        return WalkState::Continue;
-                    }
-                };
-                if !is_file(&entry) {
-                    return WalkState::Continue;
-                }
-                let Some(repo) = find_repo(entry.path(), &roots) else {
-                    return WalkState::Continue;
-                };
-                let Ok(relative) = entry.path().strip_prefix(&repo.local_path) else {
-                    return WalkState::Continue;
-                };
-                visitor(repo, entry.path(), relative);
-                WalkState::Continue
-            })
-        });
-    }
-}
-
+/// # Errors
+///
+/// Returns an error if a repository glob is invalid.
 pub fn select_repos(repos: Vec<RepoRecord>, filter: &RepoFilter) -> Result<Vec<RepoRecord>> {
     let repo_globs = build_glob_set(&filter.repo_globs)?;
     Ok(repos
@@ -194,55 +122,83 @@ pub fn select_repos(repos: Vec<RepoRecord>, filter: &RepoFilter) -> Result<Vec<R
         .collect())
 }
 
+/// Searches all selected working trees and emits results from worker threads.
+///
+/// # Errors
+///
+/// Returns an error if the search pattern or a path glob is invalid. File
+/// traversal and read errors are emitted as [`SearchEvent::Error`] values and
+/// counted in the returned statistics.
 pub fn search(
     repos: &[RepoRecord],
     options: &SearchOptions,
-    emit: &Arc<dyn Fn(SearchEvent) + Send + Sync>,
-) -> Result<SearchStats> {
-    search_files(&WorkingTrees, repos, options, emit)
-}
-
-pub fn search_files(
-    universe: &dyn FileUniverse,
-    repos: &[RepoRecord],
-    options: &SearchOptions,
-    emit: &Arc<dyn Fn(SearchEvent) + Send + Sync>,
+    emit: &(dyn Fn(SearchEvent) + Sync),
 ) -> Result<SearchStats> {
     if repos.is_empty() {
         return Ok(SearchStats::default());
     }
+    let roots: Arc<HashMap<PathBuf, RepoRecord>> = Arc::new(
+        repos
+            .iter()
+            .cloned()
+            .map(|repo| (repo.local_path.clone(), repo))
+            .collect(),
+    );
     let matcher = Arc::new(build_matcher(options)?);
     let path_filter = Arc::new(PathFilter::new(&options.globs, &options.path_prefixes)?);
     let reported_repos = Arc::new(Mutex::new(HashSet::<String>::new()));
     let match_count = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
-    let output_mode = options.output_mode;
-    let before_context = options.before_context;
-    let after_context = options.after_context;
-    let file_visitor: FileVisitor = {
+    let mut walker = WalkBuilder::empty();
+    for repo in repos {
+        walker.add(&repo.local_path);
+    }
+    walker
+        .hidden(false)
+        .follow_links(false)
+        .require_git(true)
+        .threads(options.threads)
+        .filter_entry(|entry| entry.file_name() != ".git");
+    walker.build_parallel().run(|| {
+        let roots = Arc::clone(&roots);
         let matcher = Arc::clone(&matcher);
         let path_filter = Arc::clone(&path_filter);
         let reported_repos = Arc::clone(&reported_repos);
         let match_count = Arc::clone(&match_count);
         let errors = Arc::clone(&errors);
-        let emit = Arc::clone(emit);
-        Arc::new(move |repo, absolute_path, relative| {
+        let output_mode = options.output_mode;
+        let mut searcher = build_searcher(options.before_context, options.after_context);
+        Box::new(move |entry| {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    errors.fetch_add(1, Ordering::Relaxed);
+                    emit(SearchEvent::Error {
+                        path: None,
+                        message: error.to_string(),
+                    });
+                    return WalkState::Continue;
+                }
+            };
+            if !is_file(&entry) {
+                return WalkState::Continue;
+            }
+            let Some(repo) = find_repo(entry.path(), &roots) else {
+                return WalkState::Continue;
+            };
+            let Ok(relative) = entry.path().strip_prefix(&repo.local_path) else {
+                return WalkState::Continue;
+            };
             if output_mode == SearchOutputMode::ReposWithMatches
                 && reported_repos
                     .lock()
                     .is_ok_and(|set| set.contains(&repo.id))
             {
-                return;
+                return WalkState::Continue;
             }
             if !path_filter.matches(relative) {
-                return;
+                return WalkState::Continue;
             }
-            let mut searcher = SearcherBuilder::new()
-                .line_number(true)
-                .before_context(before_context)
-                .after_context(after_context)
-                .binary_detection(BinaryDetection::quit(b'\0'))
-                .build();
             let sink = EventSink {
                 repo: &repo.id,
                 path: relative,
@@ -253,24 +209,16 @@ pub fn search_files(
                 emit: &emit,
                 count: 0,
             };
-            if let Err(error) = searcher.search_path(&*matcher, absolute_path, sink) {
+            if let Err(error) = searcher.search_path(&*matcher, entry.path(), sink) {
                 errors.fetch_add(1, Ordering::Relaxed);
                 emit(SearchEvent::Error {
-                    path: Some(absolute_path.to_path_buf()),
+                    path: Some(entry.path().to_path_buf()),
                     message: error.to_string(),
                 });
             }
+            WalkState::Continue
         })
-    };
-    let error_visitor: FileWalkErrorVisitor = {
-        let errors = Arc::clone(&errors);
-        let emit = Arc::clone(emit);
-        Arc::new(move |path, message| {
-            errors.fetch_add(1, Ordering::Relaxed);
-            emit(SearchEvent::Error { path, message });
-        })
-    };
-    universe.visit(repos, options.threads, &file_visitor, &error_visitor);
+    });
 
     Ok(SearchStats {
         matches: match_count.load(Ordering::Relaxed),
@@ -278,24 +226,35 @@ pub fn search_files(
     })
 }
 
+fn build_searcher(before_context: usize, after_context: usize) -> Searcher {
+    SearcherBuilder::new()
+        .line_number(true)
+        .before_context(before_context)
+        .after_context(after_context)
+        .binary_detection(BinaryDetection::quit(b'\0'))
+        .build()
+}
+
 fn build_matcher(options: &SearchOptions) -> Result<RegexMatcher> {
     let mut builder = RegexMatcherBuilder::new();
-    builder
-        .case_insensitive(options.ignore_case)
-        .case_smart(options.smart_case)
-        .word(options.word);
-    let result = if options.fixed_strings {
-        builder.build_literals(&[&options.pattern])
-    } else {
-        builder.build(&options.pattern)
+    match options.case {
+        CaseMode::Sensitive => {}
+        CaseMode::Insensitive => {
+            builder.case_insensitive(true);
+        }
+        CaseMode::Smart => {
+            builder.case_smart(true);
+        }
+    }
+    builder.word(options.word);
+    let result = match options.pattern_kind {
+        PatternKind::Regex => builder.build(&options.pattern),
+        PatternKind::Fixed => builder.build_literals(&[&options.pattern]),
     };
     result.map_err(|error| Error::Search(error.to_string()))
 }
 
-fn find_repo<'a>(
-    path: &Path,
-    roots: &'a HashMap<PathBuf, Arc<RepoRecord>>,
-) -> Option<&'a Arc<RepoRecord>> {
+fn find_repo<'a>(path: &Path, roots: &'a HashMap<PathBuf, RepoRecord>) -> Option<&'a RepoRecord> {
     path.ancestors().find_map(|ancestor| roots.get(ancestor))
 }
 
@@ -358,7 +317,7 @@ struct EventSink<'a> {
     mode: SearchOutputMode,
     reported_repos: &'a Mutex<HashSet<String>>,
     matches: &'a AtomicU64,
-    emit: &'a Arc<dyn Fn(SearchEvent) + Send + Sync>,
+    emit: &'a (dyn Fn(SearchEvent) + Sync),
     count: u64,
 }
 
@@ -405,11 +364,12 @@ impl Sink for EventSink<'_> {
                 Ok(false)
             }
             SearchOutputMode::ReposWithMatches => {
-                let mut reported = self
+                let first_match = self
                     .reported_repos
                     .lock()
-                    .map_err(|_| std::io::Error::other("repository result lock poisoned"))?;
-                if reported.insert(self.repo.to_owned()) {
+                    .map_err(|_| std::io::Error::other("repository result lock poisoned"))?
+                    .insert(self.repo.to_owned());
+                if first_match {
                     (self.emit)(SearchEvent::Repo {
                         repo: self.repo.to_owned(),
                     });
@@ -501,8 +461,7 @@ mod tests {
         };
         let events = Arc::new(Mutex::new(Vec::new()));
         let output = Arc::clone(&events);
-        let emit: Arc<dyn Fn(SearchEvent) + Send + Sync> =
-            Arc::new(move |event| output.lock().unwrap().push(event));
+        let emit = move |event| output.lock().unwrap().push(event);
         let stats = search(
             &[repo],
             &SearchOptions {

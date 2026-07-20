@@ -1,15 +1,15 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, LINK, USER_AGENT};
+use reqwest::header::LINK;
 use serde::Deserialize;
 
-use super::{Filters, canonicalize_remote, token_from_env};
+use super::{Filters, authenticated_headers, canonicalize_remote};
 use crate::config::GitHubConfig;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::model::{CloneProtocol, RepoSpec};
 
-pub(crate) struct GitHubSource {
+pub(super) struct GitHubSource {
     name: String,
     api_url: String,
     client: reqwest::Client,
@@ -22,19 +22,9 @@ pub(crate) struct GitHubSource {
 }
 
 impl GitHubSource {
-    pub(crate) fn new(config: &GitHubConfig) -> Result<Self> {
-        let token = token_from_env(&config.token_env)?;
-        let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static("multi-repo/0.1"));
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/vnd.github+json"),
-        );
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|error| Error::Config(format!("invalid GitHub token: {error}")))?,
-        );
+    pub(super) fn new(config: &GitHubConfig) -> Result<Self> {
+        let headers =
+            authenticated_headers(&config.token_env, "application/vnd.github+json", "GitHub")?;
         Ok(Self {
             name: config.name.clone(),
             api_url: config.api_url.trim_end_matches('/').to_owned(),
@@ -52,7 +42,7 @@ impl GitHubSource {
         })
     }
 
-    pub(crate) async fn discover(&self) -> Result<Vec<RepoSpec>> {
+    pub(super) async fn discover(&self) -> Result<Vec<RepoSpec>> {
         let mut next = Some(format!(
             "{}/user/repos?per_page=100&affiliation=owner,collaborator,organization_member",
             self.api_url
@@ -80,7 +70,6 @@ impl GitHubSource {
                 };
                 discovered.push(RepoSpec {
                     id: format!("{}/{}", self.name, repo.full_name),
-                    source: self.name.clone(),
                     canonical_url: canonicalize_remote(&clone_url)?,
                     clone_url,
                     default_branch: Some(repo.default_branch),
@@ -95,7 +84,10 @@ impl GitHubSource {
 fn next_link(value: &str) -> Option<String> {
     value.split(',').find_map(|part| {
         let (url, attributes) = part.trim().split_once(';')?;
-        if attributes.trim() == "rel=\"next\"" {
+        if attributes
+            .split(';')
+            .any(|attribute| attribute.trim() == "rel=\"next\"")
+        {
             Some(url.trim().trim_matches(['<', '>']).to_owned())
         } else {
             None

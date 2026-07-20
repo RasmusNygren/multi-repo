@@ -4,9 +4,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepoSpec {
+pub(crate) struct RepoSpec {
     pub id: String,
-    pub source: String,
     pub canonical_url: String,
     pub clone_url: String,
     pub default_branch: Option<String>,

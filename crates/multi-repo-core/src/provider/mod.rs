@@ -6,47 +6,30 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::config::SourceConfig;
 use crate::error::{Error, Result};
 use crate::model::RepoSpec;
 
-pub(crate) enum Provider {
-    GitHub(github::GitHubSource),
-    Bitbucket(bitbucket::BitbucketSource),
-    Manifest(manifest::ManifestSource),
-}
-
-impl Provider {
-    pub(crate) async fn discover(&self) -> Result<Vec<RepoSpec>> {
-        match self {
-            Self::GitHub(source) => source.discover().await,
-            Self::Bitbucket(source) => source.discover().await,
-            Self::Manifest(source) => source.discover(),
-        }
-    }
-}
-
-pub(crate) fn from_config(config: &SourceConfig) -> Result<Provider> {
+pub(crate) async fn discover(config: &SourceConfig) -> Result<Vec<RepoSpec>> {
     match config {
-        SourceConfig::GitHub(config) => Ok(Provider::GitHub(github::GitHubSource::new(config)?)),
-        SourceConfig::BitbucketServer(config) => Ok(Provider::Bitbucket(
-            bitbucket::BitbucketSource::new(config)?,
-        )),
-        SourceConfig::Manifest(config) => {
-            Ok(Provider::Manifest(manifest::ManifestSource::new(config)))
+        SourceConfig::GitHub(config) => github::GitHubSource::new(config)?.discover().await,
+        SourceConfig::BitbucketServer(config) => {
+            bitbucket::BitbucketSource::new(config)?.discover().await
         }
+        SourceConfig::Manifest(config) => manifest::ManifestSource::new(config).discover(),
     }
 }
 
-pub(crate) struct Filters {
+struct Filters {
     include: GlobSet,
     exclude: GlobSet,
     include_all: bool,
 }
 
 impl Filters {
-    pub(crate) fn new(include: &[String], exclude: &[String]) -> Result<Self> {
+    fn new(include: &[String], exclude: &[String]) -> Result<Self> {
         Ok(Self {
             include: build_globs(include)?,
             exclude: build_globs(exclude)?,
@@ -54,7 +37,7 @@ impl Filters {
         })
     }
 
-    pub(crate) fn matches(&self, value: &str) -> bool {
+    fn matches(&self, value: &str) -> bool {
         (self.include_all || self.include.is_match(value)) && !self.exclude.is_match(value)
     }
 }
@@ -72,7 +55,7 @@ fn build_globs(values: &[String]) -> Result<GlobSet> {
         .map_err(|error| Error::Config(format!("invalid glob set: {error}")))
 }
 
-pub(crate) fn tags(defaults: &[String], specific: &[String]) -> BTreeSet<String> {
+fn tags(defaults: &[String], specific: &[String]) -> BTreeSet<String> {
     defaults
         .iter()
         .chain(specific)
@@ -81,30 +64,73 @@ pub(crate) fn tags(defaults: &[String], specific: &[String]) -> BTreeSet<String>
         .collect()
 }
 
-pub(crate) fn token_from_env(name: &str) -> Result<String> {
-    std::env::var(name).map_err(|_| {
+fn authenticated_headers(
+    token_env: &str,
+    accept: &'static str,
+    provider: &str,
+) -> Result<HeaderMap> {
+    let token = std::env::var(token_env).map_err(|_| {
         Error::Config(format!(
-            "environment variable {name:?} is required for repository discovery"
+            "environment variable {token_env:?} is required for repository discovery"
         ))
-    })
+    })?;
+    let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|error| Error::Config(format!("invalid {provider} token: {error}")))?;
+    authorization.set_sensitive(true);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static(concat!("multi-repo/", env!("CARGO_PKG_VERSION"))),
+    );
+    headers.insert(ACCEPT, HeaderValue::from_static(accept));
+    headers.insert(AUTHORIZATION, authorization);
+    Ok(headers)
 }
 
 pub(crate) fn canonicalize_remote(remote: &str) -> Result<String> {
-    let trimmed = remote.trim().trim_end_matches('/').trim_end_matches(".git");
+    let trimmed = remote.trim().trim_end_matches('/');
     if trimmed.contains("://") {
         let url = url::Url::parse(trimmed)?;
         let host = url
             .host_str()
             .ok_or_else(|| Error::Config(format!("clone URL has no host: {remote:?}")))?
             .to_ascii_lowercase();
-        let path = url.path().trim_matches('/').trim_end_matches(".git");
-        return Ok(format!("{host}/{path}"));
+        let authority = url
+            .port()
+            .map_or_else(|| host.clone(), |port| format!("{host}:{port}"));
+        let path = strip_git_suffix(url.path().trim_matches('/'));
+        return Ok(format!("{authority}/{path}"));
     }
     if let Some((host, path)) = trimmed.rsplit_once(':') {
         let host = host.rsplit('@').next().unwrap_or(host).to_ascii_lowercase();
-        return Ok(format!("{host}/{}", path.trim_matches('/')));
+        return Ok(format!(
+            "{host}/{}",
+            strip_git_suffix(path.trim_matches('/'))
+        ));
     }
-    let path = Path::new(trimmed);
+    let path = Path::new(strip_git_suffix(trimmed));
     let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     Ok(format!("file/{}", absolute.to_string_lossy()))
+}
+
+fn strip_git_suffix(value: &str) -> &str {
+    value.strip_suffix(".git").unwrap_or(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonicalize_remote;
+
+    #[test]
+    fn canonicalizes_common_remote_forms_without_losing_ports() {
+        assert_eq!(
+            canonicalize_remote("git@GitHub.com:acme/widget.git").unwrap(),
+            "github.com/acme/widget"
+        );
+        assert_eq!(
+            canonicalize_remote("https://example.com:8443/acme/widget.git").unwrap(),
+            "example.com:8443/acme/widget"
+        );
+    }
 }

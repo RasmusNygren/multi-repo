@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -15,6 +15,12 @@ pub struct State {
 }
 
 impl State {
+    /// Opens or creates the state database and applies the current schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state directory cannot be created, the database
+    /// cannot be opened or initialized, or its schema is unsupported.
     pub fn initialize(state_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(state_dir).map_err(|source| Error::Write {
             path: state_dir.to_path_buf(),
@@ -58,12 +64,16 @@ impl State {
         Ok(state)
     }
 
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn reconcile_source(
+    /// Reconciles one successful source discovery with the stored inventory.
+    ///
+    /// Existing repositories and source associations are retained but marked
+    /// inactive when they are no longer discovered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid repository data, conflicting identities,
+    /// non-UTF-8 managed paths, serialization failures, or database failures.
+    pub(crate) fn reconcile_source(
         &self,
         source: &str,
         specs: &[RepoSpec],
@@ -78,12 +88,6 @@ impl State {
 
         let mut ids = Vec::with_capacity(specs.len());
         for spec in specs {
-            if spec.source != source {
-                return Err(Error::Config(format!(
-                    "source {source:?} returned repository {:?} for source {:?}",
-                    spec.id, spec.source
-                )));
-            }
             validate_repo_name(&spec.id)?;
             let id = repository_id(&transaction, spec)?;
             let local_path = repos_dir.join(&id);
@@ -122,10 +126,23 @@ impl State {
             [],
         )?;
         transaction.commit()?;
-        ids.into_iter().map(|id| self.get(&id)).collect()
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = ids.into_iter().collect::<BTreeSet<_>>();
+        Ok(self
+            .list(true)?
+            .into_iter()
+            .filter(|repo| ids.contains(&repo.id))
+            .collect())
     }
 
-    pub fn mark_ready(&self, id: &str) -> Result<()> {
+    /// Marks a repository ready and clears its last synchronization error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database update fails.
+    pub(crate) fn mark_ready(&self, id: &str) -> Result<()> {
         self.set_result(id, RepoStatus::Ready, None)
     }
 
@@ -138,7 +155,12 @@ impl State {
         Ok(())
     }
 
-    pub fn mark_error(&self, id: &str, error: &str, preserve_ready: bool) -> Result<()> {
+    /// Records a synchronization error, optionally retaining ready status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database update fails.
+    pub(crate) fn mark_error(&self, id: &str, error: &str, preserve_ready: bool) -> Result<()> {
         let connection = self.connect()?;
         if preserve_ready {
             connection.execute(
@@ -154,75 +176,65 @@ impl State {
         Ok(())
     }
 
+    /// Lists repositories and their active source associations in ID order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be queried or stored tags
+    /// cannot be decoded.
     pub fn list(&self, include_inactive: bool) -> Result<Vec<RepoRecord>> {
         let connection = self.connect()?;
         let sql = if include_inactive {
-            "SELECT id FROM repos ORDER BY id"
+            "SELECT id, canonical_url, clone_url, local_path, default_branch,
+                    active, status, last_error
+             FROM repos ORDER BY id"
         } else {
-            "SELECT id FROM repos WHERE active = 1 ORDER BY id"
+            "SELECT id, canonical_url, clone_url, local_path, default_branch,
+                    active, status, last_error
+             FROM repos WHERE active = 1 ORDER BY id"
         };
-        let mut statement = connection.prepare(sql)?;
-        let ids = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(statement);
-        drop(connection);
-        ids.into_iter().map(|id| self.get(&id)).collect()
+        let mut records = {
+            let mut statement = connection.prepare(sql)?;
+            statement
+                .query_map([], repo_from_row)?
+                .map(|result| result.map(|repo| (repo.id.clone(), repo)))
+                .collect::<std::result::Result<BTreeMap<_, _>, _>>()?
+        };
+        let mut statement = connection.prepare(
+            "SELECT repo_id, source, tags_json FROM repo_sources
+             WHERE active = 1 ORDER BY repo_id, source",
+        )?;
+        let associations = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for association in associations {
+            let (repo_id, source, tags) = association?;
+            let Some(record) = records.get_mut(&repo_id) else {
+                continue;
+            };
+            record.sources.insert(source);
+            record
+                .tags
+                .extend(serde_json::from_str::<BTreeSet<String>>(&tags)?);
+        }
+        Ok(records.into_values().collect())
     }
 
+    /// Lists active, ready repositories whose working trees still exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the inventory cannot be loaded.
     pub fn searchable(&self) -> Result<Vec<RepoRecord>> {
         Ok(self
             .list(false)?
             .into_iter()
             .filter(|repo| repo.status == RepoStatus::Ready && repo.local_path.is_dir())
             .collect())
-    }
-
-    pub fn get(&self, id: &str) -> Result<RepoRecord> {
-        let connection = self.connect()?;
-        let mut record = connection.query_row(
-            "SELECT id, canonical_url, clone_url, local_path, default_branch,
-                    active, status, last_error
-             FROM repos WHERE id = ?1",
-            [id],
-            |row| {
-                let status: String = row.get(6)?;
-                Ok(RepoRecord {
-                    id: row.get(0)?,
-                    canonical_url: row.get(1)?,
-                    clone_url: row.get(2)?,
-                    local_path: PathBuf::from(row.get::<_, String>(3)?),
-                    default_branch: row.get(4)?,
-                    active: row.get(5)?,
-                    status: RepoStatus::parse(&status).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
-                    sources: BTreeSet::new(),
-                    tags: BTreeSet::new(),
-                    last_error: row.get(7)?,
-                })
-            },
-        )?;
-        let mut statement = connection.prepare(
-            "SELECT source, tags_json FROM repo_sources
-             WHERE repo_id = ?1 AND active = 1 ORDER BY source",
-        )?;
-        let associations = statement
-            .query_map([id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        for (source, tags) in associations {
-            record.sources.insert(source);
-            record
-                .tags
-                .extend(serde_json::from_str::<BTreeSet<String>>(&tags)?);
-        }
-        Ok(record)
     }
 
     fn set_result(&self, id: &str, status: RepoStatus, error: Option<&str>) -> Result<()> {
@@ -240,6 +252,28 @@ impl State {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(connection)
     }
+}
+
+fn repo_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoRecord> {
+    let status: String = row.get(6)?;
+    Ok(RepoRecord {
+        id: row.get(0)?,
+        canonical_url: row.get(1)?,
+        clone_url: row.get(2)?,
+        local_path: PathBuf::from(row.get::<_, String>(3)?),
+        default_branch: row.get(4)?,
+        active: row.get(5)?,
+        status: RepoStatus::parse(&status).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        sources: BTreeSet::new(),
+        tags: BTreeSet::new(),
+        last_error: row.get(7)?,
+    })
 }
 
 fn repository_id(transaction: &Transaction<'_>, spec: &RepoSpec) -> Result<String> {
@@ -289,12 +323,20 @@ mod tests {
     fn spec(source: &str, id: &str, remote: &str) -> RepoSpec {
         RepoSpec {
             id: format!("{source}/{id}"),
-            source: source.into(),
             canonical_url: remote.into(),
             clone_url: remote.into(),
             default_branch: Some("main".into()),
             tags: BTreeSet::from(["rust".into()]),
         }
+    }
+
+    fn find_record(state: &State, id: &str) -> RepoRecord {
+        state
+            .list(true)
+            .unwrap()
+            .into_iter()
+            .find(|repo| repo.id == id)
+            .unwrap()
     }
 
     #[test]
@@ -309,12 +351,12 @@ mod tests {
         state
             .reconcile_source("two", &[spec("two", "org/repo", "host/org/repo")], &repos)
             .unwrap();
-        let record = state.get("one/org/repo").unwrap();
-        assert_eq!(record.sources, BTreeSet::from(["one".into(), "two".into()]));
+        let repo = find_record(&state, "one/org/repo");
+        assert_eq!(repo.sources, BTreeSet::from(["one".into(), "two".into()]));
 
         state.reconcile_source("one", &[], &repos).unwrap();
-        assert!(state.get("one/org/repo").unwrap().active);
+        assert!(find_record(&state, "one/org/repo").active);
         state.reconcile_source("two", &[], &repos).unwrap();
-        assert!(!state.get("one/org/repo").unwrap().active);
+        assert!(!find_record(&state, "one/org/repo").active);
     }
 }

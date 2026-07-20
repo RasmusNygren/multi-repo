@@ -1,15 +1,14 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
 
-use super::{Filters, canonicalize_remote, token_from_env};
+use super::{Filters, authenticated_headers, canonicalize_remote};
 use crate::config::BitbucketServerConfig;
 use crate::error::{Error, Result};
 use crate::model::{CloneProtocol, RepoSpec};
 
-pub(crate) struct BitbucketSource {
+pub(super) struct BitbucketSource {
     name: String,
     base_url: String,
     client: reqwest::Client,
@@ -21,16 +20,8 @@ pub(crate) struct BitbucketSource {
 }
 
 impl BitbucketSource {
-    pub(crate) fn new(config: &BitbucketServerConfig) -> Result<Self> {
-        let token = token_from_env(&config.token_env)?;
-        let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static("multi-repo/0.1"));
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|error| Error::Config(format!("invalid Bitbucket token: {error}")))?,
-        );
+    pub(super) fn new(config: &BitbucketServerConfig) -> Result<Self> {
+        let headers = authenticated_headers(&config.token_env, "application/json", "Bitbucket")?;
         let mut client = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(Duration::from_secs(10))
@@ -93,7 +84,6 @@ impl BitbucketSource {
                     .href;
                 discovered.push(RepoSpec {
                     id: format!("{}/{}", self.name, name),
-                    source: self.name.clone(),
                     canonical_url: canonicalize_remote(&clone_url)?,
                     clone_url,
                     default_branch: repo.default_branch.map(|branch| branch.display_id),
@@ -112,10 +102,7 @@ impl BitbucketSource {
         }
         Ok(discovered)
     }
-}
-
-impl BitbucketSource {
-    pub(crate) async fn discover(&self) -> Result<Vec<RepoSpec>> {
+    pub(super) async fn discover(&self) -> Result<Vec<RepoSpec>> {
         let mut discovered = Vec::new();
         if self.projects.is_empty() {
             discovered.extend(

@@ -17,7 +17,7 @@ pub enum SyncAction {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GitSyncResult {
+pub(crate) struct GitSyncResult {
     pub action: SyncAction,
     pub detail: Option<String>,
     pub detected_default_branch: Option<String>,
@@ -35,11 +35,11 @@ pub(crate) fn sync_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitS
     }
 
     let origin = git_stdout(&repo.local_path, ["remote", "get-url", "origin"])?;
-    if canonicalize_remote(origin.trim())? != repo.canonical_url {
+    if canonicalize_remote(&origin)? != repo.canonical_url {
         return Err(Error::Git(format!(
             "{} has origin {:?}, expected {:?}",
             repo.local_path.display(),
-            origin.trim(),
+            origin,
             repo.clone_url
         )));
     }
@@ -54,10 +54,7 @@ pub(crate) fn sync_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitS
         git_success(&repo.local_path, ["fetch", "--quiet", "--prune", "origin"])?;
     }
 
-    let detected_default_branch = repo
-        .default_branch
-        .clone()
-        .or_else(|| remote_default_branch(&repo.local_path).ok().flatten());
+    let detected_default_branch = default_branch(repo)?;
     let dirty = !git_stdout(&repo.local_path, ["status", "--porcelain=v1"])?.is_empty();
     let branch = git_optional_stdout(
         &repo.local_path,
@@ -77,13 +74,11 @@ pub(crate) fn sync_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitS
             Some(default_branch),
         ));
     };
-    if branch.trim() != default_branch {
+    if branch != default_branch {
         return Ok(result(
             SyncAction::Fetched,
             Some(format!(
-                "on branch {:?}; fetched without switching to {:?}",
-                branch.trim(),
-                default_branch
+                "on branch {branch:?}; fetched without switching to {default_branch:?}"
             )),
             Some(default_branch),
         ));
@@ -99,7 +94,7 @@ pub(crate) fn sync_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitS
     let upstream = format!("origin/{default_branch}");
     let head = git_stdout(&repo.local_path, ["rev-parse", "HEAD"])?;
     let remote_head = git_stdout(&repo.local_path, ["rev-parse", upstream.as_str()])?;
-    if head.trim() == remote_head.trim() {
+    if head == remote_head {
         return Ok(result(SyncAction::Unchanged, None, Some(default_branch)));
     }
     let ancestor = Command::new("git")
@@ -160,15 +155,12 @@ fn clone_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitSyncResult>
             source,
         })?;
     }
-    let temporary = temporary.keep();
-    std::fs::rename(&temporary, &repo.local_path).map_err(|source| Error::Write {
+    std::fs::rename(temporary.path(), &repo.local_path).map_err(|source| Error::Write {
         path: repo.local_path.clone(),
         source,
     })?;
-    let detected_default_branch = repo
-        .default_branch
-        .clone()
-        .or_else(|| remote_default_branch(&repo.local_path).ok().flatten());
+    let _ = temporary.keep();
+    let detected_default_branch = default_branch(repo)?;
     Ok(GitSyncResult {
         action: SyncAction::Cloned,
         detail: None,
@@ -187,6 +179,13 @@ fn remote_default_branch(path: &Path) -> Result<Option<String>> {
         ],
     )?
     .and_then(|reference| reference.strip_prefix("origin/").map(str::to_owned)))
+}
+
+fn default_branch(repo: &RepoRecord) -> Result<Option<String>> {
+    repo.default_branch.clone().map_or_else(
+        || remote_default_branch(&repo.local_path),
+        |branch| Ok(Some(branch)),
+    )
 }
 
 fn result(

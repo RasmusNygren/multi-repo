@@ -5,12 +5,12 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-use multi_repo_core::git::SyncAction;
 use multi_repo_core::search::{
-    MatchEvent, RepoFilter, SearchEvent, SearchOptions, SearchOutputMode, search, select_repos,
+    CaseMode, MatchEvent, PatternKind, RepoFilter, SearchEvent, SearchOptions, SearchOutputMode,
+    search, select_repos,
 };
 use multi_repo_core::sync::{SyncOptions, synchronize};
-use multi_repo_core::{Config, Error, State};
+use multi_repo_core::{Config, Error, State, SyncAction};
 use serde_json::{Value, json};
 
 #[derive(Debug, Parser)]
@@ -73,6 +73,7 @@ struct FilterArgs {
 }
 
 #[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)]
 #[command(group(
     clap::ArgGroup::new("result_mode")
         .args(["files_with_matches", "repos_with_matches", "count"])
@@ -145,6 +146,9 @@ enum ColorChoice {
 async fn main() -> ExitCode {
     match run().await {
         Ok(code) => ExitCode::from(code),
+        Err(Error::Write { source, .. }) if source.kind() == io::ErrorKind::BrokenPipe => {
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("multi-repo: {error}");
             ExitCode::from(2)
@@ -154,19 +158,17 @@ async fn main() -> ExitCode {
 
 async fn run() -> multi_repo_core::Result<u8> {
     let cli = Cli::parse();
-    let (config, _) = Config::load(cli.config.as_deref())?;
-    let state = State::initialize(&config.state_dir())?;
+    let config = Config::load(cli.config.as_deref())?;
     match cli.command {
-        Command::Sync(args) => run_sync(&config, &state, &args).await,
-        Command::List(args) => run_list(&state, &args),
-        Command::Grep(args) => run_grep(&state, &args),
+        Command::Sync(args) => run_sync(&config, &args).await,
+        Command::List(args) => run_list(&State::initialize(&config.state_dir())?, &args),
+        Command::Grep(args) => run_grep(&State::initialize(&config.state_dir())?, &args),
     }
 }
 
-async fn run_sync(config: &Config, state: &State, args: &SyncArgs) -> multi_repo_core::Result<u8> {
+async fn run_sync(config: &Config, args: &SyncArgs) -> multi_repo_core::Result<u8> {
     let report = synchronize(
         config,
-        state,
         SyncOptions {
             jobs: args.jobs,
             dry_run: args.dry_run,
@@ -201,7 +203,7 @@ async fn run_sync(config: &Config, state: &State, args: &SyncArgs) -> multi_repo
             println!("{}: {action}", repo.id);
         }
     }
-    Ok(u8::from(report.failed()) * 2)
+    Ok(if report.failed() { 2 } else { 0 })
 }
 
 fn run_list(state: &State, args: &ListArgs) -> multi_repo_core::Result<u8> {
@@ -222,9 +224,18 @@ fn run_grep(state: &State, args: &GrepArgs) -> multi_repo_core::Result<u8> {
     let context = args.context;
     let options = SearchOptions {
         pattern: args.pattern.clone(),
-        fixed_strings: args.fixed_strings,
-        ignore_case: args.ignore_case,
-        smart_case: args.smart_case,
+        pattern_kind: if args.fixed_strings {
+            PatternKind::Fixed
+        } else {
+            PatternKind::Regex
+        },
+        case: if args.ignore_case {
+            CaseMode::Insensitive
+        } else if args.smart_case {
+            CaseMode::Smart
+        } else {
+            CaseMode::Sensitive
+        },
         word: args.word,
         before_context: context.unwrap_or(args.before_context),
         after_context: context.unwrap_or(args.after_context),
@@ -249,13 +260,12 @@ fn run_grep(state: &State, args: &GrepArgs) -> multi_repo_core::Result<u8> {
         };
     let output = Arc::new(Output::new(args.json, use_color, args.sort_path));
     let callback_output = Arc::clone(&output);
-    let emit: Arc<dyn Fn(SearchEvent) + Send + Sync> =
-        Arc::new(move |event| callback_output.handle(event));
-    let stats = search(&repos, &options, &emit)?;
+    let emit = move |event| callback_output.handle(event);
+    let search_stats = search(&repos, &options, &emit)?;
     output.finish()?;
-    if stats.errors > 0 {
+    if search_stats.errors > 0 {
         Ok(2)
-    } else if stats.matches > 0 {
+    } else if search_stats.matches > 0 {
         Ok(0)
     } else {
         Ok(1)
@@ -278,6 +288,7 @@ struct Output {
     sort: bool,
     buffered: Mutex<Vec<SearchEvent>>,
     stdout: Mutex<io::Stdout>,
+    error: Mutex<Option<io::Error>>,
 }
 
 impl Output {
@@ -288,6 +299,7 @@ impl Output {
             sort,
             buffered: Mutex::new(Vec::new()),
             stdout: Mutex::new(io::stdout()),
+            error: Mutex::new(None),
         }
     }
 
@@ -303,49 +315,92 @@ impl Output {
             return;
         }
         if self.sort {
-            if let Ok(mut buffered) = self.buffered.lock() {
-                buffered.push(event);
+            match self.buffered.lock() {
+                Ok(mut buffered) => buffered.push(event),
+                Err(_) => self.record_error(io::Error::other("output buffer lock poisoned")),
             }
-        } else if let Ok(mut stdout) = self.stdout.lock()
-            && let Err(error) = write_event(&mut *stdout, &event, self.json, self.color)
-        {
-            eprintln!("failed to write search output: {error}");
+        } else {
+            let result = self
+                .stdout
+                .lock()
+                .map_err(|_| io::Error::other("stdout lock poisoned"))
+                .and_then(|mut stdout| write_event(&mut *stdout, &event, self.json, self.color));
+            if let Err(error) = result {
+                self.record_error(error);
+            }
         }
     }
 
     fn finish(&self) -> multi_repo_core::Result<()> {
-        if !self.sort {
-            return Ok(());
+        if self.sort {
+            let mut events = {
+                let mut buffered = self
+                    .buffered
+                    .lock()
+                    .map_err(|_| Error::Task("output buffer lock poisoned".into()))?;
+                std::mem::take(&mut *buffered)
+            };
+            events.sort_by(compare_events);
+            let mut stdout = self
+                .stdout
+                .lock()
+                .map_err(|_| Error::Task("stdout lock poisoned".into()))?;
+            for event in &events {
+                if let Err(error) = write_event(&mut *stdout, event, self.json, self.color) {
+                    self.record_error(error);
+                    break;
+                }
+            }
         }
-        let mut events = self
-            .buffered
-            .lock()
-            .map_err(|_| Error::Task("output buffer lock poisoned".into()))?;
-        events.sort_by_key(event_sort_key);
         let mut stdout = self
             .stdout
             .lock()
             .map_err(|_| Error::Task("stdout lock poisoned".into()))?;
-        for event in &*events {
-            write_event(&mut *stdout, event, self.json, self.color).map_err(|source| {
-                Error::Write {
-                    path: PathBuf::from("<stdout>"),
-                    source,
-                }
-            })?;
+        if let Err(error) = stdout.flush() {
+            self.record_error(error);
         }
-        Ok(())
+        drop(stdout);
+        let error = self
+            .error
+            .lock()
+            .map_err(|_| Error::Task("output error lock poisoned".into()))?
+            .take();
+        error.map_or(Ok(()), |source| {
+            Err(Error::Write {
+                path: PathBuf::from("<stdout>"),
+                source,
+            })
+        })
+    }
+
+    fn record_error(&self, error: io::Error) {
+        if let Ok(mut recorded) = self.error.lock()
+            && recorded.is_none()
+        {
+            *recorded = Some(error);
+        }
     }
 }
 
-fn event_sort_key(event: &SearchEvent) -> (String, PathBuf, u64) {
+fn compare_events(left: &SearchEvent, right: &SearchEvent) -> std::cmp::Ordering {
+    event_sort_key(left).cmp(&event_sort_key(right))
+}
+
+fn event_sort_key(event: &SearchEvent) -> (&str, &Path, u64, u8) {
     match event {
-        SearchEvent::Match(found) => (found.repo.clone(), found.path.clone(), found.line),
+        SearchEvent::Match(found) => (
+            &found.repo,
+            &found.path,
+            found.line,
+            u8::from(found.context),
+        ),
         SearchEvent::File { repo, path } | SearchEvent::Count { repo, path, .. } => {
-            (repo.clone(), path.clone(), 0)
+            (repo, path, 0, 2)
         }
-        SearchEvent::Repo { repo } => (repo.clone(), PathBuf::new(), 0),
-        SearchEvent::Error { path, .. } => (String::new(), path.clone().unwrap_or_default(), 0),
+        SearchEvent::Repo { repo } => (repo, Path::new(""), 0, 3),
+        SearchEvent::Error { path, .. } => {
+            ("", path.as_deref().unwrap_or_else(|| Path::new("")), 0, 4)
+        }
     }
 }
 

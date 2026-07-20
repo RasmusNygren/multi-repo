@@ -8,24 +8,22 @@ use crate::config::{ManifestConfig, validate_repo_name};
 use crate::error::{Error, Result};
 use crate::model::RepoSpec;
 
-pub(crate) struct ManifestSource {
+pub(super) struct ManifestSource {
     name: String,
     path: PathBuf,
     default_tags: Vec<String>,
 }
 
 impl ManifestSource {
-    pub(crate) fn new(config: &ManifestConfig) -> Self {
+    pub(super) fn new(config: &ManifestConfig) -> Self {
         Self {
             name: config.name.clone(),
             path: config.path.clone(),
             default_tags: config.tags.clone(),
         }
     }
-}
 
-impl ManifestSource {
-    pub(crate) fn discover(&self) -> Result<Vec<RepoSpec>> {
+    pub(super) fn discover(&self) -> Result<Vec<RepoSpec>> {
         let contents = std::fs::read_to_string(&self.path).map_err(|source| Error::Read {
             path: self.path.clone(),
             source,
@@ -50,7 +48,6 @@ impl ManifestSource {
             }
             repos.push(RepoSpec {
                 id: format!("{}/{}", self.name, repo.id),
-                source: self.name.clone(),
                 canonical_url: canonicalize_remote(&repo.url)?,
                 clone_url: repo.url,
                 default_branch: repo.default_branch,

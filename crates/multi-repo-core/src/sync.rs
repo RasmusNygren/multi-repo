@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use tokio::task::JoinSet;
 
 use crate::config::{Config, SourceConfig};
@@ -47,11 +46,16 @@ impl SyncReport {
     }
 }
 
-pub async fn synchronize(
-    config: &Config,
-    state: &State,
-    options: SyncOptions,
-) -> Result<SyncReport> {
+/// Discovers configured repositories and synchronizes their working trees.
+///
+/// A dry run performs discovery only and does not create local state.
+///
+/// # Errors
+///
+/// Returns an error if synchronization is already running or local state,
+/// task scheduling, or inventory reconciliation fails. Individual provider
+/// and Git failures are captured in the returned report.
+pub async fn synchronize(config: &Config, options: SyncOptions) -> Result<SyncReport> {
     let _lock = if options.dry_run {
         None
     } else {
@@ -67,6 +71,9 @@ pub async fn synchronize(
         discoveries.push(result.map_err(|error| Error::Task(error.to_string()))?);
     }
 
+    let state = (!options.dry_run)
+        .then(|| State::initialize(&config.state_dir()))
+        .transpose()?;
     let mut report = SyncReport::default();
     let mut desired = BTreeMap::<String, RepoRecord>::new();
     for (source, result) in discoveries {
@@ -77,7 +84,7 @@ pub async fn synchronize(
                     discovered: specs.len(),
                     error: None,
                 });
-                if !options.dry_run {
+                if let Some(state) = &state {
                     for repo in state.reconcile_source(&source, &specs, &config.repos_dir())? {
                         desired.insert(repo.id.clone(), repo);
                     }
@@ -97,7 +104,9 @@ pub async fn synchronize(
         return Ok(report);
     }
 
-    let state = state.clone();
+    let Some(state) = state else {
+        return Err(Error::Task("state was not initialized".into()));
+    };
     let temporary_root = config.state_dir().join("tmp");
     let mut pending = desired.into_values();
     let mut sync_tasks = JoinSet::new();
@@ -118,10 +127,7 @@ pub async fn synchronize(
 
 async fn discover_source(source_config: SourceConfig) -> (String, Result<Vec<RepoSpec>>) {
     let source_name = source_config.name().to_owned();
-    let result = match provider::from_config(&source_config) {
-        Ok(source) => source.discover().await,
-        Err(error) => Err(error),
-    };
+    let result = provider::discover(&source_config).await;
     (source_name, result)
 }
 
@@ -204,6 +210,15 @@ fn acquire_lock(path: &Path) -> Result<File> {
             path: path.to_path_buf(),
             source,
         })?;
-    file.try_lock_exclusive().map_err(|_| Error::SyncLocked)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Err(Error::SyncLocked),
+        Err(TryLockError::Error(source)) => {
+            return Err(Error::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
     Ok(file)
 }

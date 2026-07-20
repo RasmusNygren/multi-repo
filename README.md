@@ -14,17 +14,19 @@ The initial release supports:
 
 ## Install
 
-The project currently targets macOS and Linux and requires Git:
+The project currently targets macOS and Linux and requires Git and Rust 1.95
+or newer:
 
 ```console
-cargo install --path crates/multi-repo-cli
+cargo install --locked --path crates/multi-repo-cli
 ```
 
 ## Configure
 
-The default configuration is
-`$XDG_CONFIG_HOME/multi-repo/config.toml`. Pass `--config PATH` to use another
-file. Relative paths are resolved from the configuration file.
+The default configuration is `$XDG_CONFIG_HOME/multi-repo/config.toml`, falling
+back to `$HOME/.config/multi-repo/config.toml` (`%APPDATA%` on Windows). Pass
+`--config PATH` to use another file. Relative paths are resolved from the
+configuration file.
 
 ```toml
 version = 1
@@ -126,9 +128,9 @@ search remains available.
 
 ```console
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-cargo build --workspace --release
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo build --workspace --release --locked
 cargo run --release -p multi-repo-core --example search-smoke
 ```
 

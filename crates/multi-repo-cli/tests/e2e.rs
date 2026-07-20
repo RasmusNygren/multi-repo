@@ -43,6 +43,10 @@ fn manifest_sync_list_and_working_tree_search() {
     )
     .unwrap();
 
+    let dry_run = command(&config, ["sync", "--dry-run"]);
+    assert_success(&dry_run);
+    assert!(!temp.path().join("managed").exists());
+
     let sync = command(&config, ["sync"]);
     assert_success(&sync);
     assert!(String::from_utf8_lossy(&sync.stdout).contains("manual/acme/repo: cloned"));

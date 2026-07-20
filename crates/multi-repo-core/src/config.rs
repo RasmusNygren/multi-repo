@@ -20,11 +20,8 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum SourceConfig {
-    #[serde(rename = "github")]
     GitHub(GitHubConfig),
-    #[serde(rename = "bitbucket-server")]
     BitbucketServer(BitbucketServerConfig),
-    #[serde(rename = "manifest")]
     Manifest(ManifestConfig),
 }
 
@@ -90,7 +87,16 @@ const fn default_true() -> bool {
 }
 
 impl Config {
-    pub fn load(path: Option<&Path>) -> Result<(Self, PathBuf)> {
+    /// Loads and validates configuration from `path` or the platform default.
+    ///
+    /// Relative paths in the configuration are resolved relative to the
+    /// configuration file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path cannot be determined, the file cannot be
+    /// read or parsed, or the configuration is invalid.
+    pub fn load(path: Option<&Path>) -> Result<Self> {
         let path = match path {
             Some(path) => path.to_path_buf(),
             None => default_config_path()?,
@@ -128,7 +134,7 @@ impl Config {
                 SourceConfig::GitHub(_) => {}
             }
         }
-        Ok((config, path))
+        Ok(config)
     }
 
     #[must_use]
