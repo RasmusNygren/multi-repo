@@ -43,14 +43,14 @@ impl State {
                 active INTEGER NOT NULL DEFAULT 1,
                 status TEXT NOT NULL DEFAULT 'pending',
                 last_error TEXT
-            );
+            ) STRICT;
             CREATE TABLE IF NOT EXISTS repo_sources (
                 repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
                 source TEXT NOT NULL,
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 active INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (repo_id, source)
-            );
+            ) STRICT;
             ",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
