@@ -1,11 +1,10 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, LINK, USER_AGENT};
 use serde::Deserialize;
 
-use super::{Filters, RepoSource, canonicalize_remote, token_from_env};
+use super::{Filters, canonicalize_remote, token_from_env};
 use crate::config::GitHubConfig;
 use crate::error::{Error, Result};
 use crate::model::{CloneProtocol, RepoSpec};
@@ -52,15 +51,8 @@ impl GitHubSource {
             tags: config.tags.iter().cloned().collect(),
         })
     }
-}
 
-#[async_trait]
-impl RepoSource for GitHubSource {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    async fn discover(&self) -> Result<Vec<RepoSpec>> {
+    pub(crate) async fn discover(&self) -> Result<Vec<RepoSpec>> {
         let mut next = Some(format!(
             "{}/user/repos?per_page=100&affiliation=owner,collaborator,organization_member",
             self.api_url

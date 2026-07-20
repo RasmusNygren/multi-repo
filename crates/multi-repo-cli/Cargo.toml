@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 base64.workspace = true
-bstr.workspace = true
 clap.workspace = true
 multi-repo-core = { path = "../multi-repo-core" }
 serde_json.workspace = true
@@ -23,4 +22,3 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
-

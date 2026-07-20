@@ -5,26 +5,37 @@ mod manifest;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use async_trait::async_trait;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::config::SourceConfig;
 use crate::error::{Error, Result};
 use crate::model::RepoSpec;
 
-#[async_trait]
-pub trait RepoSource: Send + Sync {
-    fn name(&self) -> &str;
-    async fn discover(&self) -> Result<Vec<RepoSpec>>;
+pub(crate) enum Provider {
+    GitHub(github::GitHubSource),
+    Bitbucket(bitbucket::BitbucketSource),
+    Manifest(manifest::ManifestSource),
 }
 
-pub(crate) fn from_config(config: &SourceConfig) -> Result<Box<dyn RepoSource>> {
-    match config {
-        SourceConfig::GitHub(config) => Ok(Box::new(github::GitHubSource::new(config)?)),
-        SourceConfig::BitbucketServer(config) => {
-            Ok(Box::new(bitbucket::BitbucketSource::new(config)?))
+impl Provider {
+    pub(crate) async fn discover(&self) -> Result<Vec<RepoSpec>> {
+        match self {
+            Self::GitHub(source) => source.discover().await,
+            Self::Bitbucket(source) => source.discover().await,
+            Self::Manifest(source) => source.discover(),
         }
-        SourceConfig::Manifest(config) => Ok(Box::new(manifest::ManifestSource::new(config))),
+    }
+}
+
+pub(crate) fn from_config(config: &SourceConfig) -> Result<Provider> {
+    match config {
+        SourceConfig::GitHub(config) => Ok(Provider::GitHub(github::GitHubSource::new(config)?)),
+        SourceConfig::BitbucketServer(config) => Ok(Provider::Bitbucket(
+            bitbucket::BitbucketSource::new(config)?,
+        )),
+        SourceConfig::Manifest(config) => {
+            Ok(Provider::Manifest(manifest::ManifestSource::new(config)))
+        }
     }
 }
 

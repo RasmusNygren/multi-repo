@@ -1,11 +1,10 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
 
-use super::{Filters, RepoSource, canonicalize_remote, token_from_env};
+use super::{Filters, canonicalize_remote, token_from_env};
 use crate::config::BitbucketServerConfig;
 use crate::error::{Error, Result};
 use crate::model::{CloneProtocol, RepoSpec};
@@ -115,13 +114,8 @@ impl BitbucketSource {
     }
 }
 
-#[async_trait]
-impl RepoSource for BitbucketSource {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    async fn discover(&self) -> Result<Vec<RepoSpec>> {
+impl BitbucketSource {
+    pub(crate) async fn discover(&self) -> Result<Vec<RepoSpec>> {
         let mut discovered = Vec::new();
         if self.projects.is_empty() {
             discovered.extend(

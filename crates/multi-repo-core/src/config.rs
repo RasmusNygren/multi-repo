@@ -93,9 +93,7 @@ impl Config {
     pub fn load(path: Option<&Path>) -> Result<(Self, PathBuf)> {
         let path = match path {
             Some(path) => path.to_path_buf(),
-            None => dirs::config_dir()
-                .ok_or_else(|| Error::Config("cannot determine configuration directory".into()))?
-                .join("multi-repo/config.toml"),
+            None => default_config_path()?,
         };
         let contents = std::fs::read_to_string(&path).map_err(|source| Error::Read {
             path: path.clone(),
@@ -157,9 +155,9 @@ impl SourceConfig {
 
 fn resolve_path(base: &Path, path: &Path) -> Result<PathBuf> {
     let expanded = if path == Path::new("~") {
-        dirs::home_dir().ok_or_else(|| Error::Config("cannot determine home directory".into()))?
+        home_dir().ok_or_else(|| Error::Config("cannot determine home directory".into()))?
     } else if let Ok(rest) = path.strip_prefix("~/") {
-        dirs::home_dir()
+        home_dir()
             .ok_or_else(|| Error::Config("cannot determine home directory".into()))?
             .join(rest)
     } else {
@@ -170,6 +168,40 @@ fn resolve_path(base: &Path, path: &Path) -> Result<PathBuf> {
     } else {
         base.join(expanded)
     })
+}
+
+fn default_config_path() -> Result<PathBuf> {
+    let directory = env_path("XDG_CONFIG_HOME")
+        .or_else(platform_config_dir)
+        .or_else(|| home_dir().map(|home| home.join(".config")))
+        .ok_or_else(|| Error::Config("cannot determine configuration directory".into()))?;
+    Ok(directory.join("multi-repo/config.toml"))
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn platform_config_dir() -> Option<PathBuf> {
+    env_path("APPDATA")
+}
+
+#[cfg(not(windows))]
+const fn platform_config_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(windows)]
+fn home_dir() -> Option<PathBuf> {
+    env_path("USERPROFILE").or_else(|| env_path("HOME"))
+}
+
+#[cfg(not(windows))]
+fn home_dir() -> Option<PathBuf> {
+    env_path("HOME")
 }
 
 pub(crate) fn validate_repo_name(name: &str) -> Result<()> {

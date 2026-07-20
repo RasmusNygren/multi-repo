@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
-use futures::stream::{self, StreamExt};
+use tokio::task::JoinSet;
 
-use crate::config::Config;
+use crate::config::{Config, SourceConfig};
 use crate::error::{Error, Result};
 use crate::git::{GitSyncResult, SyncAction, sync_repo};
-use crate::model::{RepoRecord, RepoStatus};
+use crate::model::{RepoRecord, RepoSpec, RepoStatus};
 use crate::provider;
 use crate::state::State;
 
@@ -58,18 +58,14 @@ pub async fn synchronize(
         Some(acquire_lock(&config.state_dir().join("sync.lock"))?)
     };
 
-    let discoveries = stream::iter(config.sources.iter().cloned())
-        .map(|source_config| async move {
-            let source_name = source_config.name().to_owned();
-            let result = match provider::from_config(&source_config) {
-                Ok(source) => source.discover().await,
-                Err(error) => Err(error),
-            };
-            (source_name, result)
-        })
-        .buffer_unordered(config.sources.len().max(1))
-        .collect::<Vec<_>>()
-        .await;
+    let mut discovery_tasks = JoinSet::new();
+    for source_config in &config.sources {
+        discovery_tasks.spawn(discover_source(source_config.clone()));
+    }
+    let mut discoveries = Vec::with_capacity(config.sources.len());
+    while let Some(result) = discovery_tasks.join_next().await {
+        discoveries.push(result.map_err(|error| Error::Task(error.to_string()))?);
+    }
 
     let mut report = SyncReport::default();
     let mut desired = BTreeMap::<String, RepoRecord>::new();
@@ -103,64 +99,92 @@ pub async fn synchronize(
 
     let state = state.clone();
     let temporary_root = config.state_dir().join("tmp");
-    report.repos = stream::iter(desired.into_values())
-        .map(|repo| {
-            let state = state.clone();
-            let temporary_root = temporary_root.clone();
-            async move {
-                let id = repo.id.clone();
-                let preserve_ready = repo.status == RepoStatus::Ready;
-                let result = tokio::task::spawn_blocking(move || sync_repo(&repo, &temporary_root))
-                    .await
-                    .map_err(|error| Error::Task(error.to_string()))
-                    .and_then(|result| result);
-                match result {
-                    Ok(GitSyncResult {
-                        action,
-                        detail,
-                        detected_default_branch,
-                    }) => {
-                        let state_result = detected_default_branch
-                            .as_deref()
-                            .map_or(Ok(()), |branch| state.record_default_branch(&id, branch))
-                            .and_then(|()| state.mark_ready(&id));
-                        match state_result {
-                            Ok(()) => RepoSyncReport {
-                                id,
-                                action: Some(action),
-                                detail,
-                                error: None,
-                            },
-                            Err(error) => RepoSyncReport {
-                                id,
-                                action: Some(action),
-                                detail,
-                                error: Some(error.to_string()),
-                            },
-                        }
-                    }
-                    Err(error) => {
-                        let message = error.to_string();
-                        let state_error = state
-                            .mark_error(&id, &message, preserve_ready)
-                            .err()
-                            .map(|error| format!("; failed to record error: {error}"))
-                            .unwrap_or_default();
-                        RepoSyncReport {
-                            id,
-                            action: None,
-                            detail: None,
-                            error: Some(format!("{message}{state_error}")),
-                        }
-                    }
-                }
-            }
-        })
-        .buffer_unordered(options.jobs.max(1))
-        .collect()
-        .await;
+    let mut pending = desired.into_values();
+    let mut sync_tasks = JoinSet::new();
+    for repo in pending.by_ref().take(options.jobs.max(1)) {
+        spawn_sync_task(&mut sync_tasks, repo, state.clone(), temporary_root.clone());
+    }
+    while let Some(result) = sync_tasks.join_next().await {
+        report
+            .repos
+            .push(result.map_err(|error| Error::Task(error.to_string()))?);
+        if let Some(repo) = pending.next() {
+            spawn_sync_task(&mut sync_tasks, repo, state.clone(), temporary_root.clone());
+        }
+    }
     report.repos.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(report)
+}
+
+async fn discover_source(source_config: SourceConfig) -> (String, Result<Vec<RepoSpec>>) {
+    let source_name = source_config.name().to_owned();
+    let result = match provider::from_config(&source_config) {
+        Ok(source) => source.discover().await,
+        Err(error) => Err(error),
+    };
+    (source_name, result)
+}
+
+fn spawn_sync_task(
+    tasks: &mut JoinSet<RepoSyncReport>,
+    repo: RepoRecord,
+    state: State,
+    temporary_root: PathBuf,
+) {
+    tasks.spawn(synchronize_repo(repo, state, temporary_root));
+}
+
+async fn synchronize_repo(
+    repo: RepoRecord,
+    state: State,
+    temporary_root: PathBuf,
+) -> RepoSyncReport {
+    let id = repo.id.clone();
+    let preserve_ready = repo.status == RepoStatus::Ready;
+    let result = tokio::task::spawn_blocking(move || sync_repo(&repo, &temporary_root))
+        .await
+        .map_err(|error| Error::Task(error.to_string()))
+        .and_then(|result| result);
+    match result {
+        Ok(GitSyncResult {
+            action,
+            detail,
+            detected_default_branch,
+        }) => {
+            let state_result = detected_default_branch
+                .as_deref()
+                .map_or(Ok(()), |branch| state.record_default_branch(&id, branch))
+                .and_then(|()| state.mark_ready(&id));
+            match state_result {
+                Ok(()) => RepoSyncReport {
+                    id,
+                    action: Some(action),
+                    detail,
+                    error: None,
+                },
+                Err(error) => RepoSyncReport {
+                    id,
+                    action: Some(action),
+                    detail,
+                    error: Some(error.to_string()),
+                },
+            }
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let state_error = state
+                .mark_error(&id, &message, preserve_ready)
+                .err()
+                .map(|error| format!("; failed to record error: {error}"))
+                .unwrap_or_default();
+            RepoSyncReport {
+                id,
+                action: None,
+                detail: None,
+                error: Some(format!("{message}{state_error}")),
+            }
+        }
+    }
 }
 
 fn acquire_lock(path: &Path) -> Result<File> {

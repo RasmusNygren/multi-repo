@@ -1,10 +1,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{RepoSource, canonicalize_remote, tags};
+use super::{canonicalize_remote, tags};
 use crate::config::{ManifestConfig, validate_repo_name};
 use crate::error::{Error, Result};
 use crate::model::RepoSpec;
@@ -25,13 +24,8 @@ impl ManifestSource {
     }
 }
 
-#[async_trait]
-impl RepoSource for ManifestSource {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    async fn discover(&self) -> Result<Vec<RepoSpec>> {
+impl ManifestSource {
+    pub(crate) fn discover(&self) -> Result<Vec<RepoSpec>> {
         let contents = std::fs::read_to_string(&self.path).map_err(|source| Error::Read {
             path: self.path.clone(),
             source,
