@@ -1,34 +1,43 @@
 # multi-repo
 
-`multi-repo` is a fast, safe manager for collections of Git repositories. It
-discovers repositories, keeps local clones up to date without destroying local
-work, and searches every working tree in one process.
+`multi-repo` is a command-line tool for keeping a collection of Git
+repositories synchronized and searching all of them at once.
 
-The initial release supports:
+It can:
 
-- GitHub and GitHub Enterprise repository discovery.
-- Bitbucket Server/Data Center 8.19 repository discovery.
-- Explicit TOML repository manifests.
-- Concurrent clone/fetch with fast-forward-only working tree updates.
-- In-process, parallel, ripgrep-class searching across every repository.
+- discover repositories from GitHub, GitHub Enterprise, Bitbucket Server/Data
+  Center 8.19, or a TOML manifest;
+- clone, fetch, and safely fast-forward repositories without overwriting local
+  work; and
+- search every repository in parallel with ripgrep-compatible matching.
+
+`multi-repo` supports macOS and Linux.
 
 ## Install
 
-The project currently targets macOS and Linux and requires Git and Rust 1.95
-or newer:
+Install [Git](https://git-scm.com/) and Rust 1.95 or newer, then install the
+latest version from this repository:
 
 ```console
-cargo install --locked --path crates/multi-repo-cli
+cargo install --locked --git https://github.com/RasmusNygren/multi-repo multi-repo
 ```
 
-## Configure
+## Quick start
 
-Each managed collection is a workspace with a `.multi-repo.toml` configuration
-at its root. Commands find the nearest configuration by searching the current
-directory and its parents, so they also work from inside a managed repository.
-Pass `--config PATH` to select a workspace explicitly.
+Create a directory for the workspace:
 
-Create a directory for the collection and add `.multi-repo.toml`:
+```console
+mkdir -p ~/multi-repo-workspace
+cd ~/multi-repo-workspace
+```
+
+Set a GitHub access token that can list the repositories you want to manage:
+
+```console
+export GITHUB_TOKEN=your-token
+```
+
+Create `.multi-repo.toml`:
 
 ```toml
 version = 1
@@ -36,72 +45,173 @@ version = 1
 [[source]]
 name = "github"
 kind = "github"
-api_url = "https://api.github.com"
-token = "replace-with-your-github-token"
-clone_protocol = "ssh"
-include = ["*/mar-*"]
-include_forks = false
-include_archived = false
-
-[[source]]
-name = "stash"
-kind = "bitbucket-server"
-base_url = "https://stash.example.com"
-token = "replace-with-your-bitbucket-token"
-clone_protocol = "ssh"
-projects = ["PLATFORM"]
-
-[[repo]]
-id = "special-tool"
-url = "git@github.com:acme/special-tool.git"
-default_branch = "main"
-tags = ["manual"]
+token_env = "GITHUB_TOKEN"
+include = ["your-org/*"]
 ```
 
-The configuration directory is the workspace root by default. An optional
-`root` setting can select another location; all relative paths, including
-`root`, manifests, CA bundles, and local repository URLs, are resolved from the
-configuration file.
-Different workspace directories can therefore define completely independent
-collections that combine any number of GitHub, Bitbucket, and manifest sources.
-
-Repositories declared directly in `.multi-repo.toml` use their configured IDs
-and are stored under `<workspace>/repos/<id>`. They can be selected with
-`--source workspace` as well as normal `--repo` and `--tag` filters.
-
-Each GitHub or Bitbucket source must configure exactly one of `token` or
-`token_env`. An inline `token` is the simplest option, but it is stored as
-plaintext in `.multi-repo.toml`. Keep that file local, never commit or share it,
-and restrict its permissions on Unix-like systems:
+Synchronize the workspace and search it:
 
 ```console
-chmod 600 .multi-repo.toml
+multi-repo sync
+multi-repo list
+multi-repo grep 'TODO|FIXME'
 ```
 
-For a shared configuration or an automated environment, store only the name of
-an environment variable instead:
+Repositories are cloned into `repos/`. Authentication for cloning and fetching
+is handled by Git, independently of the API token used for discovery. The
+default clone protocol is SSH, so make sure your SSH key works with GitHub or
+set `clone_protocol = "https"` and configure a Git credential helper.
 
-```toml
-token_env = "GITHUB_TOKEN"
+## Common tasks
+
+Preview changes to the repository inventory without modifying state or working
+trees:
+
+```console
+multi-repo sync --dry-run
 ```
 
-Inline tokens are redacted from debug output and neither form is written to the
-state database. Bitbucket uses its HTTP access token as a bearer token for REST
-discovery. Clone and fetch authentication is delegated to Git, so SSH
-configuration and HTTPS credential helpers continue to work.
+Search selected repositories, tags, or paths:
 
-For large, generated, or reusable repository lists, a workspace can optionally
-reference a separate manifest:
+```console
+multi-repo grep TODO --repo 'github/your-org/*'
+multi-repo grep -F 'edition = "2024"' --tag rust -g Cargo.toml
+multi-repo grep error -C 2 -- src tests
+```
+
+Review repositories that disappeared from their source, then remove those that
+are safe to delete:
+
+```console
+multi-repo list --all
+multi-repo prune --dry-run
+multi-repo prune
+```
+
+Synchronization always fetches existing repositories. It fast-forwards the
+checked-out branch only when the working tree is clean, the checked-out branch
+is the recorded default branch, and that branch is strictly behind its remote.
+Dirty, divergent, detached, and feature-branch working trees are left as they
+are.
+
+Repositories that disappear from a source become inactive but are not deleted
+by `sync`. `prune` deletes only inactive Git working trees with no tracked or
+non-ignored untracked changes, local-only branch commits, stashes, or linked
+worktrees.
+
+## Configuration reference
+
+Commands look for the nearest `.multi-repo.toml` in the current directory or
+one of its parents. Use the global `--config PATH` option to select a different
+file.
+
+Unknown settings are rejected. Relative paths and `~/` paths are resolved from
+the directory containing the configuration file. Unless `root` is set, that
+directory is also the workspace root.
+
+### Workspace settings
+
+| Setting | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `version` | integer | yes | — | Configuration format version. The only supported value is `1`. |
+| `root` | path | no | configuration directory | Directory that contains `repos/` and `.multi-repo/`. |
+| `[[source]]` | array of tables | no | `[]` | Repository discovery sources. See the source types below. |
+| `[[repo]]` | array of tables | no | `[]` | Repositories declared directly in the workspace configuration. |
+
+Source names must be unique, must be a single safe path component, and cannot
+be `workspace`, which is reserved for directly declared repositories.
+
+### GitHub source
 
 ```toml
 [[source]]
-name = "generated"
-kind = "manifest"
-path = "repos.toml"
-tags = ["generated"]
+name = "github"
+kind = "github"
+api_url = "https://api.github.com"
+token_env = "GITHUB_TOKEN"
+clone_protocol = "ssh"
+include = ["acme/*"]
+exclude = ["acme/archived-*"]
+include_forks = false
+include_archived = false
+include_private = true
+tags = ["github"]
 ```
 
-The external manifest is also versioned TOML:
+| Setting | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `name` | string | yes | — | Unique source name. Repository IDs begin with this value. |
+| `kind` | string | yes | — | Must be `"github"`. |
+| `api_url` | URL | no | `"https://api.github.com"` | REST API base URL. Set this for GitHub Enterprise. |
+| `token` | string | conditionally | — | Inline API token. Exactly one of `token` and `token_env` is required. |
+| `token_env` | string | conditionally | — | Name of an environment variable containing the API token. Exactly one of `token` and `token_env` is required. |
+| `clone_protocol` | string | no | `"ssh"` | Clone URL to use: `"ssh"` or `"https"`. |
+| `include` | array of globs | no | `[]` | Include matching `owner/repository` names. An empty list includes all names. |
+| `exclude` | array of globs | no | `[]` | Exclude matching `owner/repository` names after applying `include`. |
+| `include_forks` | boolean | no | `false` | Include forked repositories. |
+| `include_archived` | boolean | no | `false` | Include archived repositories. |
+| `include_private` | boolean | no | `true` | Include private repositories. |
+| `tags` | array of strings | no | `[]` | Tags added to every repository discovered by this source. |
+
+GitHub repositories receive IDs in the form
+`<source-name>/<owner>/<repository>`.
+
+### Bitbucket Server source
+
+```toml
+[[source]]
+name = "bitbucket"
+kind = "bitbucket-server"
+base_url = "https://bitbucket.example.com"
+token_env = "BITBUCKET_TOKEN"
+clone_protocol = "ssh"
+projects = ["PLATFORM"]
+include = ["PLATFORM/*"]
+exclude = []
+include_archived = false
+tags = ["internal"]
+ca_bundle = "certificates/company-ca.pem"
+```
+
+| Setting | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `name` | string | yes | — | Unique source name. Repository IDs begin with this value. |
+| `kind` | string | yes | — | Must be `"bitbucket-server"`. |
+| `base_url` | URL | yes | — | Bitbucket Server or Data Center base URL. |
+| `token` | string | conditionally | — | Inline HTTP access token used as a bearer token. Exactly one of `token` and `token_env` is required. |
+| `token_env` | string | conditionally | — | Name of an environment variable containing the HTTP access token. Exactly one of `token` and `token_env` is required. |
+| `clone_protocol` | string | no | `"ssh"` | Clone URL to use: `"ssh"` or `"https"`. |
+| `projects` | array of strings | no | `[]` | Project keys to query. An empty list discovers every readable repository. |
+| `include` | array of globs | no | `[]` | Include matching `PROJECT/repository` names. An empty list includes all names. |
+| `exclude` | array of globs | no | `[]` | Exclude matching `PROJECT/repository` names after applying `include`. |
+| `include_archived` | boolean | no | `false` | Include archived repositories. |
+| `tags` | array of strings | no | `[]` | Tags added to every repository discovered by this source. |
+| `ca_bundle` | path | no | system trust store | PEM-encoded CA certificate to add when connecting to the Bitbucket API. |
+
+Bitbucket repositories receive IDs in the form
+`<source-name>/<project>/<repository>`.
+
+### Manifest source
+
+Use a manifest when the repository list is generated or shared separately from
+the workspace configuration:
+
+```toml
+[[source]]
+name = "catalog"
+kind = "manifest"
+path = "repos.toml"
+tags = ["catalog"]
+```
+
+| Setting | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `name` | string | yes | — | Unique source name. Repository IDs begin with this value. |
+| `kind` | string | yes | — | Must be `"manifest"`. |
+| `path` | path | yes | — | Path to the TOML manifest. |
+| `tags` | array of strings | no | `[]` | Tags added to every repository in the manifest. |
+
+The manifest uses the same `[[repo]]` format as the workspace configuration:
 
 ```toml
 version = 1
@@ -113,112 +223,134 @@ default_branch = "main"
 tags = ["rust", "service"]
 ```
 
-Local repository URLs in an external manifest are resolved relative to that
-manifest file. Remote HTTPS and SSH URLs are used unchanged.
+The manifest's top-level `version` setting is required and must be `1`.
+Manifest repository IDs are prefixed with the source name. Relative local
+repository URLs in a manifest are resolved from the manifest's directory.
 
-Provider-level `include` and `exclude` values are optional globs over names such
-as `acme/widget`. Bitbucket's `projects` list can be omitted to discover all
-repositories readable by the token.
+### Repository settings
 
-## Synchronize
+Repositories may be declared directly in `.multi-repo.toml` or inside a
+manifest.
 
-```console
-cd ~/workspaces/my-collection
-multi-repo sync
-multi-repo sync --jobs 4
-multi-repo sync --dry-run
-multi-repo list
+| Setting | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `id` | string | yes | — | Unique, safe relative path used as the repository ID. Empty, absolute, current-directory, parent-directory, and backslash components are rejected. |
+| `url` | string | yes | — | SSH URL, HTTPS URL, or local repository path passed to Git. |
+| `default_branch` | string | no | detected after clone | Branch eligible for automatic fast-forward updates. |
+| `tags` | array of strings | no | `[]` | Tags used by `--tag` filters. Manifest-source tags are combined with these tags. |
+
+Directly declared repositories keep their configured IDs, live under
+`<root>/repos/<id>`, and belong to the reserved `workspace` source.
+
+### Credentials
+
+`token_env` is recommended for shared configuration:
+
+```toml
+token_env = "GITHUB_TOKEN"
 ```
 
-Interactive synchronization shows a compact progress bar while sources are
-discovered and repositories are updated. The bar is written to the terminal
-only and is omitted when output is redirected.
+An inline `token` is stored as plaintext in `.multi-repo.toml`. If you use one,
+keep the file local and restrict its permissions:
 
-Dry runs compare discovery with the current inventory without changing either
-the inventory or working trees. Repositories prefixed with `+` would become
-active, repositories prefixed with `-` would become inactive, and the remaining
-unchanged count is shown separately:
+```console
+chmod 600 .multi-repo.toml
+```
+
+Tokens are redacted from debug output and are not written to the state
+database. Provider tokens authenticate REST discovery only; Git handles clone
+and fetch authentication.
+
+## Command reference
+
+All commands accept `--config PATH`. Run `multi-repo <command> --help` for the
+built-in reference.
+
+### `sync`
+
+Discovers configured repositories, updates the inventory, clones missing
+repositories, fetches existing ones, and performs safe fast-forwards.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--dry-run` | off | Discover and show inventory changes without modifying state or working trees. |
+| `-j, --jobs <JOBS>` | `8` | Maximum concurrent Git operations. Values below one behave as one. |
+| `--color <WHEN>` | `auto` | Color dry-run changes: `auto`, `always`, or `never`. |
+
+### `list`
+
+Lists active repositories in the inventory.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--repo <GLOB>` | all | Select repository IDs by glob. Repeat to match any supplied glob. |
+| `--source <NAME>` | all | Select repositories associated with a source. Repeat to match any supplied source. |
+| `--tag <TAG>` | all | Select repositories with a tag. Repeat to match any supplied tag. |
+| `--all` | off | Include inactive repositories. |
+| `--json` | off | Emit a JSON array instead of text. |
+
+Different filter categories are combined with AND; repeated values within one
+category are combined with OR.
+
+### `prune`
+
+Removes inactive repositories only when their working trees and local Git
+state are safe to delete.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--dry-run` | off | Report what would be removed without changing files or state. |
+
+### `grep`
+
+Searches active, successfully synchronized repository working trees. The
+default output is `repository:path:line:column:text`.
 
 ```text
-repository changes:
-  + github/acme/new-service
-  - github/acme/retired-service
-    58 unchanged
+multi-repo grep [OPTIONS] <PATTERN> [-- <PATH>...]
 ```
 
-Additions are green and removals red on an interactive terminal. Use
-`--color=always` or `--color=never` to override automatic color detection. A
-dry run with no inventory changes prints only `repository changes: none`.
+| Option | Default | Description |
+| --- | --- | --- |
+| `--repo <GLOB>` | all | Select repository IDs by glob; repeat for OR matching. |
+| `--source <NAME>` | all | Select source names; repeat for OR matching. |
+| `--tag <TAG>` | all | Select tags; repeat for OR matching. |
+| `-F, --fixed-strings` | off | Treat the pattern as a literal string instead of a regular expression. |
+| `-i, --ignore-case` | off | Match case-insensitively. Conflicts with `--smart-case`. |
+| `-S, --smart-case` | off | Ignore case unless the pattern contains an uppercase literal. Conflicts with `--ignore-case`. |
+| `-w, --word` | off | Require word boundaries around matches. |
+| `-B, --before-context <NUM>` | `0` | Print `NUM` lines before each match. |
+| `-A, --after-context <NUM>` | `0` | Print `NUM` lines after each match. |
+| `-C, --context <NUM>` | — | Print `NUM` lines before and after each match; overrides `-A` and `-B`. |
+| `-g, --glob <GLOB>` | all | Include matching paths; prefix a glob with `!` to exclude paths. Repeatable. |
+| `-l, --files-with-matches` | off | Print only files containing matches. |
+| `--repos-with-matches` | off | Print only repositories containing matches. |
+| `-c, --count` | off | Print matching-line counts per file. |
+| `--json` | off | Emit JSON Lines. |
+| `--sort-path` | off | Buffer and sort output by repository and path. |
+| `--color <WHEN>` | `auto` | Color text output: `auto`, `always`, or `never`. |
+| `-j, --threads <THREADS>` | `0` | Search worker threads; zero selects the count automatically. |
+| `-- <PATH>...` | all | Search only these paths relative to every selected repository. |
 
-New repositories are cloned with full history and blobs for the default branch.
-Existing repositories are fetched and fast-forwarded only when they are clean,
-on the recorded default branch, and strictly behind the remote. Dirty,
-divergent, detached, and feature-branch working trees are fetched but otherwise
-left untouched. Repositories removed from a source become inactive; their local
-directories are never automatically deleted.
+`--files-with-matches`, `--repos-with-matches`, and `--count` are mutually
+exclusive. Search includes dotfiles, respects Git and ripgrep ignore files,
+skips binary files, does not follow symlinks, and always excludes `.git`.
 
-After reviewing inactive repositories, prune clean working trees with:
+The exit status is `0` when matches are found, `1` when no matches are found,
+and `2` on error.
 
-```console
-multi-repo list --all
-multi-repo prune --dry-run
-multi-repo prune
-```
+## Workspace data
 
-Prune removes only inactive Git working trees with no tracked changes or
-non-ignored untracked files. Dirty or unverifiable directories are retained.
-Repositories with local-only branch commits, stashes, or linked worktrees are
-also retained. Ignored files do not make a Git working tree dirty. A successful
-deletion also removes the repository's inactive inventory entry and any managed
-parent directories left empty by the deletion.
-
-## Search
-
-```console
-multi-repo grep 'unsafe\s*\{'
-multi-repo grep -F 'edition = "2024"' -g 'Cargo.toml'
-multi-repo grep pre-commit --repos-with-matches
-multi-repo grep TODO --source github --repo 'github/acme/*'
-multi-repo grep error -C 2 --json
-multi-repo grep needle -- src tests
-```
-
-Search runs directly through ripgrep's Rust libraries. It does not launch one
-`git grep` or `rg` process per repository. The default file universe contains
-tracked files and non-ignored untracked files, includes dotfiles such as
-`.github/workflows`, respects Git and ripgrep ignore files, skips binary files,
-does not follow symlinks, and always excludes `.git`.
-
-Useful modes include fixed strings (`-F`), case control (`-i`/`-S`), word
-matching (`-w`), path globs (`-g`), context (`-A`/`-B`/`-C`), file or repository
-names only, counts, JSON Lines, and deterministic `--sort-path` output. Normal
-results use `repository:path:line:column:text`. Exit status is 0 for matches, 1
-for no matches, and 2 for errors.
-
-## State and safety
-
-Managed repositories live under `<workspace>/repos`; the transactional
-inventory is stored at `<workspace>/.multi-repo/state.sqlite3`. When `root` is
-configured, it replaces `<workspace>` for these paths. Incomplete clones stay
-under the private state directory and are made visible only after a successful
-atomic rename. Concurrent synchronization is prevented by a workspace lock,
-while search remains available.
+Repositories are stored under `<root>/repos/`. The transactional inventory,
+workspace lock, and temporary clones are stored under `<root>/.multi-repo/`.
+Incomplete clones are not moved into `repos/`. Only one mutating operation can
+run at a time, but search remains available during synchronization.
 
 ## Development
 
-```console
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
-cargo build --workspace --release --locked
-cargo run --release -p multi-repo-core --example search-smoke
-```
-
-The next planned layers are tracked-files-only search, isolated batch edits in
-Git worktrees, resumable commit/publish runs, and GitHub/Bitbucket pull-request
-adapters. A persistent search index is intentionally deferred until real corpus
-benchmarks demonstrate that the index-free engine needs one.
+See [DEVELOPMENT.md](DEVELOPMENT.md) for contributor setup and validation
+commands.
 
 ## License
 
-MIT
+[MIT](LICENSE)
