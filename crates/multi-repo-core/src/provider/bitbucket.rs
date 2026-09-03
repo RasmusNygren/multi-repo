@@ -21,7 +21,8 @@ pub(super) struct BitbucketSource {
 
 impl BitbucketSource {
     pub(super) fn new(config: &BitbucketServerConfig) -> Result<Self> {
-        let headers = authenticated_headers(&config.token_env, "application/json", "Bitbucket")?;
+        let token = config.access_token()?;
+        let headers = authenticated_headers(&token, "application/json", "Bitbucket")?;
         let mut client = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(Duration::from_secs(10))

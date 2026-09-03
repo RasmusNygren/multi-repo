@@ -23,8 +23,8 @@ pub(super) struct GitHubSource {
 
 impl GitHubSource {
     pub(super) fn new(config: &GitHubConfig) -> Result<Self> {
-        let headers =
-            authenticated_headers(&config.token_env, "application/vnd.github+json", "GitHub")?;
+        let token = config.access_token()?;
+        let headers = authenticated_headers(&token, "application/vnd.github+json", "GitHub")?;
         Ok(Self {
             name: config.name.clone(),
             api_url: config.api_url.trim_end_matches('/').to_owned(),

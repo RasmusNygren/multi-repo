@@ -37,8 +37,9 @@ version = 1
 name = "github"
 kind = "github"
 api_url = "https://api.github.com"
-token_env = "GITHUB_TOKEN"
+token = "replace-with-your-github-token"
 clone_protocol = "ssh"
+include = ["*/mar-*"]
 include_forks = false
 include_archived = false
 
@@ -46,7 +47,7 @@ include_archived = false
 name = "stash"
 kind = "bitbucket-server"
 base_url = "https://stash.example.com"
-token_env = "BITBUCKET_TOKEN"
+token = "replace-with-your-bitbucket-token"
 clone_protocol = "ssh"
 projects = ["PLATFORM"]
 
@@ -68,10 +69,26 @@ Repositories declared directly in `.multi-repo.toml` use their configured IDs
 and are stored under `<workspace>/repos/<id>`. They can be selected with
 `--source workspace` as well as normal `--repo` and `--tag` filters.
 
-Tokens are read only from the named environment variables and are never saved
-in the configuration or state database. Bitbucket uses its HTTP access token as
-a bearer token for REST discovery. Clone and fetch authentication is delegated
-to Git, so SSH configuration and HTTPS credential helpers continue to work.
+Each GitHub or Bitbucket source must configure exactly one of `token` or
+`token_env`. An inline `token` is the simplest option, but it is stored as
+plaintext in `.multi-repo.toml`. Keep that file local, never commit or share it,
+and restrict its permissions on Unix-like systems:
+
+```console
+chmod 600 .multi-repo.toml
+```
+
+For a shared configuration or an automated environment, store only the name of
+an environment variable instead:
+
+```toml
+token_env = "GITHUB_TOKEN"
+```
+
+Inline tokens are redacted from debug output and neither form is written to the
+state database. Bitbucket uses its HTTP access token as a bearer token for REST
+discovery. Clone and fetch authentication is delegated to Git, so SSH
+configuration and HTTPS credential helpers continue to work.
 
 For large, generated, or reusable repository lists, a workspace can optionally
 reference a separate manifest:

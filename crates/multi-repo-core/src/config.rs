@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
@@ -38,13 +39,14 @@ pub enum SourceConfig {
     Manifest(ManifestConfig),
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubConfig {
     pub name: String,
     #[serde(default = "default_github_api_url")]
     pub api_url: String,
-    pub token_env: String,
+    pub token: Option<String>,
+    pub token_env: Option<String>,
     #[serde(default)]
     pub clone_protocol: CloneProtocol,
     #[serde(default)]
@@ -61,12 +63,13 @@ pub struct GitHubConfig {
     pub tags: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BitbucketServerConfig {
     pub name: String,
     pub base_url: String,
-    pub token_env: String,
+    pub token: Option<String>,
+    pub token_env: Option<String>,
     #[serde(default)]
     pub clone_protocol: CloneProtocol,
     #[serde(default)]
@@ -107,6 +110,44 @@ fn default_github_api_url() -> String {
 
 const fn default_true() -> bool {
     true
+}
+
+impl fmt::Debug for GitHubConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GitHubConfig")
+            .field("name", &self.name)
+            .field("api_url", &self.api_url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("token_env", &self.token_env)
+            .field("clone_protocol", &self.clone_protocol)
+            .field("include", &self.include)
+            .field("exclude", &self.exclude)
+            .field("include_forks", &self.include_forks)
+            .field("include_archived", &self.include_archived)
+            .field("include_private", &self.include_private)
+            .field("tags", &self.tags)
+            .finish()
+    }
+}
+
+impl fmt::Debug for BitbucketServerConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BitbucketServerConfig")
+            .field("name", &self.name)
+            .field("base_url", &self.base_url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("token_env", &self.token_env)
+            .field("clone_protocol", &self.clone_protocol)
+            .field("projects", &self.projects)
+            .field("include", &self.include)
+            .field("exclude", &self.exclude)
+            .field("include_archived", &self.include_archived)
+            .field("tags", &self.tags)
+            .field("ca_bundle", &self.ca_bundle)
+            .finish()
+    }
 }
 
 impl Config {
@@ -155,6 +196,7 @@ impl Config {
         for source in &mut config.sources {
             let name = source.name();
             validate_component(name, "source name")?;
+            source.validate_credentials()?;
             if name == WORKSPACE_SOURCE_NAME {
                 return Err(Error::Config(format!(
                     "source name {WORKSPACE_SOURCE_NAME:?} is reserved for repositories declared directly in {CONFIG_FILE_NAME}"
@@ -209,6 +251,93 @@ impl SourceConfig {
             Self::Manifest(config) => &config.name,
         }
     }
+
+    fn validate_credentials(&self) -> Result<()> {
+        match self {
+            Self::GitHub(config) => validate_credentials(
+                "GitHub",
+                &config.name,
+                config.token.as_deref(),
+                config.token_env.as_deref(),
+            ),
+            Self::BitbucketServer(config) => validate_credentials(
+                "Bitbucket",
+                &config.name,
+                config.token.as_deref(),
+                config.token_env.as_deref(),
+            ),
+            Self::Manifest(_) => Ok(()),
+        }
+    }
+}
+
+impl GitHubConfig {
+    pub(crate) fn access_token(&self) -> Result<String> {
+        access_token(
+            "GitHub",
+            &self.name,
+            self.token.as_deref(),
+            self.token_env.as_deref(),
+        )
+    }
+}
+
+impl BitbucketServerConfig {
+    pub(crate) fn access_token(&self) -> Result<String> {
+        access_token(
+            "Bitbucket",
+            &self.name,
+            self.token.as_deref(),
+            self.token_env.as_deref(),
+        )
+    }
+}
+
+fn validate_credentials(
+    provider: &str,
+    source: &str,
+    token: Option<&str>,
+    token_env: Option<&str>,
+) -> Result<()> {
+    match (token, token_env) {
+        (Some(_), Some(_)) => Err(Error::Config(format!(
+            "{provider} source {source:?} must configure only one of `token` or `token_env`"
+        ))),
+        (None, None) => Err(Error::Config(format!(
+            "{provider} source {source:?} must configure one of `token` or `token_env`"
+        ))),
+        (Some(token), None) if token.trim().is_empty() => Err(Error::Config(format!(
+            "{provider} source {source:?} has an empty `token`"
+        ))),
+        (None, Some(token_env)) if token_env.trim().is_empty() => Err(Error::Config(format!(
+            "{provider} source {source:?} has an empty `token_env`"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn access_token(
+    provider: &str,
+    source: &str,
+    token: Option<&str>,
+    token_env: Option<&str>,
+) -> Result<String> {
+    validate_credentials(provider, source, token, token_env)?;
+    if let Some(token) = token {
+        return Ok(token.to_owned());
+    }
+    let token_env = token_env.expect("credentials were validated");
+    let token = std::env::var(token_env).map_err(|_| {
+        Error::Config(format!(
+            "environment variable {token_env:?} is required for {provider} source {source:?}"
+        ))
+    })?;
+    if token.trim().is_empty() {
+        return Err(Error::Config(format!(
+            "environment variable {token_env:?} for {provider} source {source:?} is empty"
+        )));
+    }
+    Ok(token)
 }
 
 fn resolve_path(base: &Path, path: &Path) -> Result<PathBuf> {
@@ -404,7 +533,75 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(file.sources.as_slice(), [SourceConfig::GitHub(_)]));
+        let [SourceConfig::GitHub(config)] = file.sources.as_slice() else {
+            panic!("expected one GitHub source");
+        };
+        assert_eq!(config.token_env.as_deref(), Some("GITHUB_TOKEN"));
+        assert!(config.token.is_none());
+    }
+
+    #[test]
+    fn loads_and_redacts_inline_provider_tokens() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(CONFIG_FILE_NAME);
+        std::fs::write(
+            &path,
+            concat!(
+                "version = 1\n",
+                "\n[[source]]\n",
+                "name = \"github\"\n",
+                "kind = \"github\"\n",
+                "token = \"github-inline-secret\"\n",
+                "\n[[source]]\n",
+                "name = \"stash\"\n",
+                "kind = \"bitbucket-server\"\n",
+                "base_url = \"https://stash.example.com\"\n",
+                "token = \"bitbucket-inline-secret\"\n",
+            ),
+        )
+        .unwrap();
+
+        let config = Config::load(Some(&path)).unwrap();
+        let SourceConfig::GitHub(github) = &config.sources[0] else {
+            panic!("expected a GitHub source");
+        };
+        let SourceConfig::BitbucketServer(bitbucket) = &config.sources[1] else {
+            panic!("expected a Bitbucket source");
+        };
+        assert_eq!(github.access_token().unwrap(), "github-inline-secret");
+        assert_eq!(bitbucket.access_token().unwrap(), "bitbucket-inline-secret");
+
+        let debug = format!("{github:?} {bitbucket:?}");
+        assert_eq!(debug.matches("[REDACTED]").count(), 2);
+        assert!(!debug.contains("github-inline-secret"));
+        assert!(!debug.contains("bitbucket-inline-secret"));
+    }
+
+    #[test]
+    fn requires_exactly_one_provider_token_source() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(CONFIG_FILE_NAME);
+        for (credentials, expected) in [
+            ("", "must configure one of"),
+            (
+                "token = \"inline-secret\"\ntoken_env = \"GITHUB_TOKEN\"\n",
+                "must configure only one of",
+            ),
+            ("token = \"\"\n", "has an empty `token`"),
+            ("token_env = \"\"\n", "has an empty `token_env`"),
+        ] {
+            std::fs::write(
+                &path,
+                format!(
+                    "version = 1\n\n[[source]]\nname = \"github\"\nkind = \"github\"\n{credentials}"
+                ),
+            )
+            .unwrap();
+
+            let error = Config::load(Some(&path)).unwrap_err().to_string();
+            assert!(error.contains(expected), "unexpected error: {error}");
+            assert!(!error.contains("inline-secret"));
+        }
     }
 
     #[test]

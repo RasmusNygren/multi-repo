@@ -3,3 +3,26 @@
 *.swo
 .DS_Store
 
+# Local multi-repo configuration and state may contain private repository names,
+# hostnames, filesystem paths, and operational metadata.
+/.multi-repo.toml
+/.multi-repo/
+
+# Local credentials and environment overrides.
+.env
+.env.*
+!.env.example
+!.env.*.example
+.netrc
+.npmrc
+.pypirc
+/.cargo/credentials
+/.cargo/credentials.toml
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Editor settings can contain machine-specific paths or environment values.
+.idea/
+.vscode/

@@ -99,16 +99,7 @@ fn tags(defaults: &[String], specific: &[String]) -> BTreeSet<String> {
         .collect()
 }
 
-fn authenticated_headers(
-    token_env: &str,
-    accept: &'static str,
-    provider: &str,
-) -> Result<HeaderMap> {
-    let token = std::env::var(token_env).map_err(|_| {
-        Error::Config(format!(
-            "environment variable {token_env:?} is required for repository discovery"
-        ))
-    })?;
+fn authenticated_headers(token: &str, accept: &'static str, provider: &str) -> Result<HeaderMap> {
     let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
         .map_err(|error| Error::Config(format!("invalid {provider} token: {error}")))?;
     authorization.set_sensitive(true);
@@ -155,7 +146,7 @@ fn strip_git_suffix(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::canonicalize_remote;
+    use super::{AUTHORIZATION, authenticated_headers, canonicalize_remote};
 
     #[test]
     fn canonicalizes_common_remote_forms_without_losing_ports() {
@@ -167,5 +158,19 @@ mod tests {
             canonicalize_remote("https://example.com:8443/acme/widget.git").unwrap(),
             "example.com:8443/acme/widget"
         );
+    }
+
+    #[test]
+    fn builds_a_sensitive_authorization_header_without_leaking_invalid_tokens() {
+        let headers = authenticated_headers("example-token", "application/json", "test").unwrap();
+        let authorization = headers.get(AUTHORIZATION).unwrap();
+        assert_eq!(authorization, "Bearer example-token");
+        assert!(authorization.is_sensitive());
+
+        let error = authenticated_headers("secret\nsensitive-fragment", "application/json", "test")
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret"));
+        assert!(!error.contains("sensitive-fragment"));
     }
 }
