@@ -34,7 +34,11 @@ pub(crate) fn sync_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitS
         )));
     }
 
-    let origin = git_stdout(&repo.local_path, ["remote", "get-url", "origin"])?;
+    // `git remote get-url` expands `url.*.insteadOf` rules. Compare the URL
+    // stored in the repository instead, so transport rewrites (including SSH
+    // host aliases) do not make the same repository appear to be a different
+    // remote.
+    let origin = git_stdout(&repo.local_path, ["config", "--get", "remote.origin.url"])?;
     if canonicalize_remote(&origin)? != repo.canonical_url {
         return Err(Error::Git(format!(
             "{} has origin {:?}, expected {:?}",
@@ -388,6 +392,79 @@ mod tests {
         assert!(diverged.detail.unwrap().contains("diverged"));
         assert!(checkout.join("local-commit.txt").exists());
         assert!(!checkout.join("remote-commit.txt").exists());
+    }
+
+    #[test]
+    fn accepts_origin_rewritten_by_instead_of() {
+        let temp = TempDir::new().unwrap();
+        let remote = temp.path().join("repo.git");
+        let seed = temp.path().join("seed");
+        run(
+            temp.path(),
+            [
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        run(
+            temp.path(),
+            ["init", "--initial-branch=main", seed.to_str().unwrap()],
+        );
+        run(&seed, ["config", "user.name", "Test"]);
+        run(&seed, ["config", "user.email", "test@example.com"]);
+        fs::write(seed.join("file.txt"), "content\n").unwrap();
+        run(&seed, ["add", "file.txt"]);
+        run(&seed, ["commit", "-m", "initial"]);
+        run(&seed, ["remote", "add", "origin", remote.to_str().unwrap()]);
+        run(&seed, ["push", "-u", "origin", "main"]);
+
+        let checkout = temp.path().join("checkout");
+        run(
+            temp.path(),
+            [
+                "clone",
+                remote.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+
+        let clone_url = "https://git.example/acme/repo.git";
+        run(&checkout, ["remote", "set-url", "origin", clone_url]);
+        let rewrite_base = format!("file://{}/", temp.path().display());
+        let rewrite_key = format!("url.{rewrite_base}.insteadOf");
+        run(
+            &checkout,
+            ["config", rewrite_key.as_str(), "https://git.example/acme/"],
+        );
+
+        assert_eq!(
+            git_stdout(&checkout, ["config", "--get", "remote.origin.url"]).unwrap(),
+            clone_url
+        );
+        assert_eq!(
+            git_stdout(&checkout, ["remote", "get-url", "origin"]).unwrap(),
+            format!("{rewrite_base}repo.git")
+        );
+
+        let repo = RepoRecord {
+            id: "manual/repo".into(),
+            canonical_url: canonicalize_remote(clone_url).unwrap(),
+            clone_url: clone_url.into(),
+            local_path: checkout,
+            default_branch: Some("main".into()),
+            active: true,
+            status: RepoStatus::Pending,
+            sources: BTreeSet::from(["manual".into()]),
+            tags: BTreeSet::new(),
+            last_error: None,
+        };
+
+        assert_eq!(
+            sync_repo(&repo, &temp.path().join("tmp")).unwrap().action,
+            SyncAction::Unchanged
+        );
     }
 
     fn run<I, S>(path: &Path, args: I)
