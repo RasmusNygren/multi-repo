@@ -31,13 +31,7 @@ mkdir -p ~/multi-repo-workspace
 cd ~/multi-repo-workspace
 ```
 
-Set a GitHub access token that can list the repositories you want to manage:
-
-```console
-export GITHUB_TOKEN=your-token
-```
-
-Create `.multi-repo.toml`:
+Create `.multi-repo.toml`, replacing the token and organization with your own:
 
 ```toml
 version = 1
@@ -45,9 +39,12 @@ version = 1
 [[source]]
 name = "github"
 kind = "github"
-token_env = "GITHUB_TOKEN"
+token = "your-github-token"
 include = ["your-org/*"]
 ```
+
+The token must be able to list the repositories you want to manage.
+Alternatively, [load the token from an environment variable](#credentials).
 
 Synchronize the workspace and search it:
 
