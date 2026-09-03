@@ -68,11 +68,23 @@ fn inline_repository_sync_list_and_working_tree_search() {
     assert!(stdout.contains("acme/repo:local.txt:1:1:needle from untracked"));
     assert!(!stdout.contains("ignored/no.txt"));
 
+    let colored = command(
+        &nested,
+        ["grep", "-F", "needle", "--sort-path", "--color", "always"],
+    );
+    assert_success(&colored);
+    let colored_stdout = String::from_utf8_lossy(&colored.stdout);
+    assert!(colored_stdout.contains("\x1b[1;31mneedle\x1b[0m from remote"));
+    assert!(colored_stdout.contains("\x1b[1;31mneedle\x1b[0m from untracked"));
+
     let repos = command(&nested, ["grep", "needle", "--repos-with-matches"]);
     assert_success(&repos);
     assert_eq!(String::from_utf8_lossy(&repos.stdout).trim(), "acme/repo");
 
-    let json_output = command(&nested, ["grep", "-F", "needle", "--json"]);
+    let json_output = command(
+        &nested,
+        ["grep", "-F", "needle", "--json", "--color", "always"],
+    );
     assert_success(&json_output);
     let events = String::from_utf8(json_output.stdout)
         .unwrap()

@@ -8,7 +8,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use multi_repo_core::prune::{PruneAction, PruneOptions, prune};
 use multi_repo_core::search::{
     CaseMode, MatchEvent, PatternKind, RepoFilter, SearchEvent, SearchOptions, SearchOutputMode,
-    search, select_repos,
+    Submatch, search, select_repos,
 };
 use multi_repo_core::sync::{
     RepositoryChange, RepositoryChangeKind, SyncOptions, SyncProgress, synchronize_with_progress,
@@ -138,7 +138,7 @@ struct GrepArgs {
     /// Buffer and sort results by repository and path
     #[arg(long)]
     sort_path: bool,
-    /// Control colored output
+    /// Control colored paths and matches
     #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
     /// Search worker threads; zero chooses automatically
@@ -573,8 +573,31 @@ fn write_match(output: &mut dyn Write, found: &MatchEvent, color: bool) -> io::R
         write!(output, ":{column}")?;
     }
     write!(output, "{separator}")?;
-    output.write_all(&found.text)?;
+    if color && !found.context {
+        write_highlighted_matches(output, &found.text, &found.submatches)?;
+    } else {
+        output.write_all(&found.text)?;
+    }
     output.write_all(b"\n")
+}
+
+fn write_highlighted_matches(
+    output: &mut dyn Write,
+    text: &[u8],
+    submatches: &[Submatch],
+) -> io::Result<()> {
+    let mut cursor = 0;
+    for found in submatches {
+        if found.start < cursor || found.start >= found.end || found.end > text.len() {
+            continue;
+        }
+        output.write_all(&text[cursor..found.start])?;
+        output.write_all(b"\x1b[1;31m")?;
+        output.write_all(&text[found.start..found.end])?;
+        output.write_all(b"\x1b[0m")?;
+        cursor = found.end;
+    }
+    output.write_all(&text[cursor..])
 }
 
 fn write_prefix(output: &mut dyn Write, repo: &str, path: &Path, color: bool) -> io::Result<()> {
@@ -691,5 +714,47 @@ mod tests {
             "  \x1b[31m- github/acme/old\x1b[0m"
         );
         assert_eq!(repository_change_line(&added, false), "  + github/acme/new");
+    }
+
+    #[test]
+    fn match_output_highlights_every_match_when_color_is_enabled() {
+        let found = MatchEvent {
+            repo: "acme/widget".into(),
+            path: PathBuf::from("README.md"),
+            line: 4,
+            column: Some(1),
+            text: b"needle and needle".to_vec(),
+            submatches: vec![
+                Submatch { start: 0, end: 6 },
+                Submatch { start: 11, end: 17 },
+            ],
+            context: false,
+        };
+        let mut output = Vec::new();
+
+        write_match(&mut output, &found, true).unwrap();
+
+        assert_eq!(
+            output,
+            b"\x1b[36macme/widget\x1b[0m:\x1b[32mREADME.md\x1b[0m:4:1:\x1b[1;31mneedle\x1b[0m and \x1b[1;31mneedle\x1b[0m\n"
+        );
+    }
+
+    #[test]
+    fn match_output_remains_plain_when_color_is_disabled() {
+        let found = MatchEvent {
+            repo: "acme/widget".into(),
+            path: PathBuf::from("README.md"),
+            line: 4,
+            column: Some(1),
+            text: b"needle".to_vec(),
+            submatches: vec![Submatch { start: 0, end: 6 }],
+            context: false,
+        };
+        let mut output = Vec::new();
+
+        write_match(&mut output, &found, false).unwrap();
+
+        assert_eq!(output, b"acme/widget:README.md:4:1:needle\n");
     }
 }

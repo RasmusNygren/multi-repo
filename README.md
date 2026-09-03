@@ -328,7 +328,7 @@ multi-repo grep [OPTIONS] <PATTERN> [-- <PATH>...]
 | `-c, --count` | off | Print matching-line counts per file. |
 | `--json` | off | Emit JSON Lines. |
 | `--sort-path` | off | Buffer and sort output by repository and path. |
-| `--color <WHEN>` | `auto` | Color text output: `auto`, `always`, or `never`. |
+| `--color <WHEN>` | `auto` | Color repository and path prefixes and highlight matches: `auto`, `always`, or `never`. |
 | `-j, --threads <THREADS>` | `0` | Search worker threads; zero selects the count automatically. |
 | `-- <PATH>...` | all | Search only these paths relative to every selected repository. |
 
