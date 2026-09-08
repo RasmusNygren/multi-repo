@@ -1,4 +1,6 @@
 version = 1
+# Set to true to clone and fetch all origin branches, including in existing clones.
+fetch_all_branches = false
 
 [[source]]
 name = "github"

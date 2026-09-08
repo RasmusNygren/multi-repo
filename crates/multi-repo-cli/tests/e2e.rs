@@ -5,6 +5,129 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 #[test]
+fn fetch_all_branches_supports_new_and_existing_clones() {
+    for all_branches_on_clone in [false, true] {
+        for default_branch in ["", "default_branch = \"main\"\n"] {
+            assert_branch_fetch_behavior(all_branches_on_clone, default_branch);
+        }
+    }
+}
+
+fn assert_branch_fetch_behavior(all_branches_on_clone: bool, default_branch: &str) {
+    let temp = TempDir::new().unwrap();
+    let remote = temp.path().join("remote.git");
+    let seed = temp.path().join("seed");
+    git(
+        temp.path(),
+        ["init", "--bare", "--initial-branch=main", text(&remote)],
+    );
+    git(temp.path(), ["init", "--initial-branch=main", text(&seed)]);
+    git(&seed, ["config", "user.name", "Test"]);
+    git(&seed, ["config", "user.email", "test@example.com"]);
+    fs::write(seed.join("file.txt"), "main\n").unwrap();
+    git(&seed, ["add", "."]);
+    git(&seed, ["commit", "-m", "initial"]);
+    git(&seed, ["branch", "feature/topic"]);
+    git(&seed, ["remote", "add", "origin", text(&remote)]);
+    git(&seed, ["push", "origin", "main", "feature/topic"]);
+
+    let config = temp.path().join(".multi-repo.toml");
+    let repositories = format!(
+        "\n[[repo]]\nid = \"repo\"\nurl = {:?}\n{default_branch}",
+        text(&remote)
+    );
+    let setting = if all_branches_on_clone {
+        "fetch_all_branches = true\n"
+    } else {
+        ""
+    };
+    fs::write(&config, format!("version = 1\n{setting}{repositories}")).unwrap();
+    assert_success(&command(temp.path(), ["sync"]));
+    let checkout = temp.path().join("repos/repo");
+    let main_head = git_revision(&seed, "main");
+    assert_eq!(git_revision(&checkout, "HEAD"), main_head);
+    assert_eq!(
+        git_revision(&checkout, "origin/feature/topic").is_some(),
+        all_branches_on_clone
+    );
+
+    git(&seed, ["checkout", "feature/topic"]);
+    fs::write(seed.join("file.txt"), "feature\n").unwrap();
+    git(&seed, ["commit", "-am", "feature update"]);
+    git(&seed, ["push", "origin", "feature/topic"]);
+    let feature_head = git_revision(&seed, "HEAD");
+    assert_success(&command(temp.path(), ["sync"]));
+    assert_eq!(
+        git_revision(&checkout, "origin/feature/topic"),
+        if all_branches_on_clone {
+            feature_head.clone()
+        } else {
+            None
+        }
+    );
+
+    fs::write(
+        &config,
+        format!("version = 1\nfetch_all_branches = true\n{repositories}"),
+    )
+    .unwrap();
+    assert_success(&command(temp.path(), ["sync"]));
+    assert_eq!(
+        git_revision(&checkout, "origin/feature/topic"),
+        feature_head
+    );
+    assert_eq!(git_revision(&checkout, "HEAD"), main_head);
+    assert_eq!(
+        fs::read_to_string(checkout.join("file.txt")).unwrap(),
+        "main\n"
+    );
+
+    // Fetching updates remote refs without moving a checked-out feature branch or its files.
+    git(
+        &checkout,
+        ["checkout", "-b", "local-feature", "origin/feature/topic"],
+    );
+    fs::write(checkout.join("file.txt"), "local changes\n").unwrap();
+    git(
+        &seed,
+        ["commit", "--allow-empty", "-m", "another feature update"],
+    );
+    git(&seed, ["push", "origin", "feature/topic"]);
+    assert_success(&command(temp.path(), ["sync"]));
+    assert_eq!(
+        git_revision(&checkout, "origin/feature/topic"),
+        git_revision(&seed, "HEAD")
+    );
+    assert_eq!(git_revision(&checkout, "HEAD"), feature_head);
+    assert_eq!(
+        fs::read_to_string(checkout.join("file.txt")).unwrap(),
+        "local changes\n"
+    );
+
+    git(&seed, ["push", "origin", "--delete", "feature/topic"]);
+    assert_success(&command(temp.path(), ["sync"]));
+    assert!(git_revision(&checkout, "origin/feature/topic").is_none());
+    assert_eq!(
+        git_revision(&checkout, "refs/heads/local-feature"),
+        feature_head
+    );
+}
+
+fn git_revision(path: &Path, reference: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--verify", "--quiet", reference])
+        .output()
+        .unwrap();
+    if output.status.code() == Some(1) {
+        return None;
+    }
+    assert_success(&output);
+    Some(String::from_utf8(output.stdout).unwrap().trim().to_owned())
+}
+
+#[test]
 fn inline_repository_sync_list_and_working_tree_search() {
     let temp = TempDir::new().unwrap();
     let workspace = temp.path().join("workspace");

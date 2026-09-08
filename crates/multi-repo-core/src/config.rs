@@ -15,6 +15,8 @@ pub(crate) const WORKSPACE_SOURCE_NAME: &str = "workspace";
 pub struct Config {
     pub version: u32,
     pub root: PathBuf,
+    /// Fetch all origin branches, including when cloning new repositories.
+    pub fetch_all_branches: bool,
     pub sources: Vec<SourceConfig>,
     pub repositories: Vec<RepositoryConfig>,
 }
@@ -24,6 +26,8 @@ pub struct Config {
 struct ConfigFile {
     version: u32,
     root: Option<PathBuf>,
+    #[serde(default)]
+    fetch_all_branches: bool,
     #[serde(default, rename = "source")]
     sources: Vec<SourceConfig>,
     #[serde(default, rename = "repo")]
@@ -190,6 +194,7 @@ impl Config {
                 None => base.to_path_buf(),
             },
             sources: file.sources,
+            fetch_all_branches: file.fetch_all_branches,
             repositories: file.repositories,
         };
         let mut names = HashSet::new();
@@ -474,6 +479,25 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn loads_fetch_all_branches_with_backwards_compatible_default() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(CONFIG_FILE_NAME);
+        for (setting, expected) in [
+            ("", false),
+            ("fetch_all_branches = false\n", false),
+            ("fetch_all_branches = true\n", true),
+        ] {
+            std::fs::write(&path, format!("version = 1\n{setting}")).unwrap();
+            assert_eq!(
+                Config::load(Some(&path)).unwrap().fetch_all_branches,
+                expected
+            );
+        }
+        std::fs::write(&path, "version = 1\nfetch_all_branches = \"true\"\n").unwrap();
+        assert!(Config::load(Some(&path)).is_err());
+    }
 
     #[test]
     fn discovers_nearest_workspace() {

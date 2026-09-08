@@ -23,9 +23,13 @@ pub(crate) struct GitSyncResult {
     pub detected_default_branch: Option<String>,
 }
 
-pub(crate) fn sync_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitSyncResult> {
+pub(crate) fn sync_repo(
+    repo: &RepoRecord,
+    temporary_root: &Path,
+    fetch_all_branches: bool,
+) -> Result<GitSyncResult> {
     if !repo.local_path.exists() {
-        return clone_repo(repo, temporary_root);
+        return clone_repo(repo, temporary_root, fetch_all_branches);
     }
     if !repo.local_path.join(".git").exists() {
         return Err(Error::Git(format!(
@@ -48,7 +52,19 @@ pub(crate) fn sync_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitS
         )));
     }
 
-    if let Some(default_branch) = &repo.default_branch {
+    if fetch_all_branches {
+        // An explicit wildcard also fetches every branch in older single-branch clones.
+        git_success(
+            &repo.local_path,
+            [
+                "fetch",
+                "--quiet",
+                "--prune",
+                "origin",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+        )?;
+    } else if let Some(default_branch) = &repo.default_branch {
         let refspec = format!("+refs/heads/{default_branch}:refs/remotes/origin/{default_branch}");
         git_success(
             &repo.local_path,
@@ -160,7 +176,11 @@ pub(crate) fn has_local_git_state(path: &Path) -> Result<bool> {
     Ok(worktrees > 1)
 }
 
-fn clone_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitSyncResult> {
+fn clone_repo(
+    repo: &RepoRecord,
+    temporary_root: &Path,
+    fetch_all_branches: bool,
+) -> Result<GitSyncResult> {
     std::fs::create_dir_all(temporary_root).map_err(|source| Error::Write {
         path: temporary_root.to_path_buf(),
         source,
@@ -174,7 +194,10 @@ fn clone_repo(repo: &RepoRecord, temporary_root: &Path) -> Result<GitSyncResult>
         })?;
 
     let mut command = Command::new("git");
-    command.args(["clone", "--quiet", "--single-branch"]);
+    command.args(["clone", "--quiet"]);
+    if !fetch_all_branches {
+        command.arg("--single-branch");
+    }
     if let Some(branch) = &repo.default_branch {
         command.args(["--branch", branch]);
     }
@@ -346,7 +369,7 @@ mod tests {
             tags: BTreeSet::new(),
             last_error: None,
         };
-        let cloned = sync_repo(&repo, &temp.path().join("tmp")).unwrap();
+        let cloned = sync_repo(&repo, &temp.path().join("tmp"), false).unwrap();
         assert_eq!(cloned.action, SyncAction::Cloned);
         assert_eq!(cloned.detected_default_branch.as_deref(), Some("main"));
 
@@ -355,7 +378,7 @@ mod tests {
         run(&seed, ["commit", "-m", "update"]);
         run(&seed, ["push", "origin", "main"]);
         fs::write(checkout.join("local.txt"), "do not discard\n").unwrap();
-        let fetched = sync_repo(&repo, &temp.path().join("tmp")).unwrap();
+        let fetched = sync_repo(&repo, &temp.path().join("tmp"), false).unwrap();
         assert_eq!(fetched.action, SyncAction::Fetched);
         assert!(fetched.detail.unwrap().contains("local changes"));
         assert_eq!(
@@ -369,7 +392,9 @@ mod tests {
 
         fs::remove_file(checkout.join("local.txt")).unwrap();
         assert_eq!(
-            sync_repo(&repo, &temp.path().join("tmp")).unwrap().action,
+            sync_repo(&repo, &temp.path().join("tmp"), false)
+                .unwrap()
+                .action,
             SyncAction::FastForwarded
         );
         assert_eq!(
@@ -387,7 +412,7 @@ mod tests {
         run(&seed, ["commit", "-m", "remote commit"]);
         run(&seed, ["push", "origin", "main"]);
 
-        let diverged = sync_repo(&repo, &temp.path().join("tmp")).unwrap();
+        let diverged = sync_repo(&repo, &temp.path().join("tmp"), false).unwrap();
         assert_eq!(diverged.action, SyncAction::Fetched);
         assert!(diverged.detail.unwrap().contains("diverged"));
         assert!(checkout.join("local-commit.txt").exists());
@@ -462,7 +487,9 @@ mod tests {
         };
 
         assert_eq!(
-            sync_repo(&repo, &temp.path().join("tmp")).unwrap().action,
+            sync_repo(&repo, &temp.path().join("tmp"), false)
+                .unwrap()
+                .action,
             SyncAction::Unchanged
         );
     }

@@ -172,14 +172,13 @@ pub async fn synchronize_with_progress(
             desired.insert(repo.id.clone(), repo);
         }
     }
-    let temporary_root = config.state_dir().join("tmp");
     let total = desired.len();
     let mut completed = 0;
     progress(SyncProgress::Repositories { completed, total });
     let mut pending = desired.into_values();
     let mut sync_tasks = JoinSet::new();
     for repo in pending.by_ref().take(options.jobs.max(1)) {
-        spawn_sync_task(&mut sync_tasks, repo, state.clone(), temporary_root.clone());
+        spawn_sync_task(&mut sync_tasks, repo, state.clone(), config);
     }
     while let Some(result) = sync_tasks.join_next().await {
         report
@@ -188,7 +187,7 @@ pub async fn synchronize_with_progress(
         completed += 1;
         progress(SyncProgress::Repositories { completed, total });
         if let Some(repo) = pending.next() {
-            spawn_sync_task(&mut sync_tasks, repo, state.clone(), temporary_root.clone());
+            spawn_sync_task(&mut sync_tasks, repo, state.clone(), config);
         }
     }
     report.repos.sort_by(|left, right| left.id.cmp(&right.id));
@@ -276,22 +275,29 @@ fn spawn_sync_task(
     tasks: &mut JoinSet<RepoSyncReport>,
     repo: RepoRecord,
     state: State,
-    temporary_root: PathBuf,
+    config: &Config,
 ) {
-    tasks.spawn(synchronize_repo(repo, state, temporary_root));
+    tasks.spawn(synchronize_repo(
+        repo,
+        state,
+        config.state_dir().join("tmp"),
+        config.fetch_all_branches,
+    ));
 }
 
 async fn synchronize_repo(
     repo: RepoRecord,
     state: State,
     temporary_root: PathBuf,
+    fetch_all_branches: bool,
 ) -> RepoSyncReport {
     let id = repo.id.clone();
     let preserve_ready = repo.status == RepoStatus::Ready;
-    let result = tokio::task::spawn_blocking(move || sync_repo(&repo, &temporary_root))
-        .await
-        .map_err(|error| Error::Task(error.to_string()))
-        .and_then(|result| result);
+    let result =
+        tokio::task::spawn_blocking(move || sync_repo(&repo, &temporary_root, fetch_all_branches))
+            .await
+            .map_err(|error| Error::Task(error.to_string()))
+            .and_then(|result| result);
     match result {
         Ok(GitSyncResult {
             action,

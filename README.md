@@ -112,11 +112,25 @@ directory is also the workspace root.
 | --- | --- | --- | --- | --- |
 | `version` | integer | yes | — | Configuration format version. The only supported value is `1`. |
 | `root` | path | no | configuration directory | Directory that contains `repos/` and `.multi-repo/`. |
+| `fetch_all_branches` | boolean | no | `false` | Clone and fetch all branches from `origin` instead of only the default branch. Applies to all repositories, including existing single-branch clones. |
 | `[[source]]` | array of tables | no | `[]` | Repository discovery sources. See the source types below. |
 | `[[repo]]` | array of tables | no | `[]` | Repositories declared directly in the workspace configuration. |
 
 Source names must be unique, must be a single safe path component, and cannot
 be `workspace`, which is reserved for directly declared repositories.
+
+To fetch all branches, add this setting before any `[[source]]` or `[[repo]]`
+tables in `.multi-repo.toml`:
+
+```toml
+version = 1
+fetch_all_branches = true
+```
+
+The next `multi-repo sync` fetches all remote branches as `origin/<branch>`
+and prunes remote-tracking branches deleted from `origin`. It still only
+fast-forwards a clean, checked-out default branch; local feature branches
+are not switched or updated.
 
 ### GitHub source
 
