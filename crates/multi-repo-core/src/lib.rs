@@ -5,6 +5,7 @@ pub mod sync;
 
 mod error;
 mod git;
+mod language;
 mod lock;
 mod model;
 mod provider;

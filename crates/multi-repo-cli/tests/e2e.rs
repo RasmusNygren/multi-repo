@@ -142,6 +142,13 @@ fn inline_repository_sync_list_and_working_tree_search() {
     git(&seed, ["config", "user.email", "test@example.com"]);
     fs::write(seed.join("README.md"), "needle from remote\n").unwrap();
     fs::write(seed.join(".gitignore"), "ignored/\n").unwrap();
+    fs::write(
+        seed.join("pyproject.toml"),
+        "[project]\nname = \"service\"\n",
+    )
+    .unwrap();
+    fs::create_dir(seed.join("src")).unwrap();
+    fs::write(seed.join("src/service.py"), "print('service')\n").unwrap();
     git(&seed, ["add", "."]);
     git(&seed, ["commit", "-m", "initial"]);
     git(&seed, ["remote", "add", "origin", text(&remote)]);
@@ -167,6 +174,8 @@ fn inline_repository_sync_list_and_working_tree_search() {
     let sync = command(&nested, ["sync"]);
     assert_success(&sync);
     assert!(String::from_utf8_lossy(&sync.stdout).contains("acme/repo: cloned"));
+
+    assert_detected_language_changes(&seed, &nested);
 
     let unchanged = command(&nested, ["sync", "--dry-run"]);
     assert_success(&unchanged);
@@ -221,6 +230,32 @@ fn inline_repository_sync_list_and_working_tree_search() {
     assert!(no_match.stdout.is_empty());
 
     assert_prune_behavior(&workspace, &nested, &config, &checkout);
+}
+
+fn assert_detected_language_changes(seed: &Path, nested: &Path) {
+    let language = command(nested, ["list", "--tag", "language:python"]);
+    assert_success(&language);
+    assert!(String::from_utf8_lossy(&language.stdout).contains("acme/repo"));
+    let other_language = command(nested, ["list", "--tag", "language:go"]);
+    assert_success(&other_language);
+    assert!(other_language.stdout.is_empty());
+
+    fs::remove_file(seed.join("pyproject.toml")).unwrap();
+    fs::remove_file(seed.join("src/service.py")).unwrap();
+    fs::remove_dir(seed.join("src")).unwrap();
+    fs::write(seed.join("go.mod"), "module example.com/service\n").unwrap();
+    fs::write(seed.join("main.go"), "package main\n").unwrap();
+    git(seed, ["add", "-A"]);
+    git(seed, ["commit", "-m", "rewrite service in Go"]);
+    git(seed, ["push", "origin", "main"]);
+    assert_success(&command(nested, ["sync"]));
+
+    let old_language = command(nested, ["list", "--tag", "language:python"]);
+    assert_success(&old_language);
+    assert!(old_language.stdout.is_empty());
+    let new_language = command(nested, ["list", "--tag", "language:go"]);
+    assert_success(&new_language);
+    assert!(String::from_utf8_lossy(&new_language.stdout).contains("acme/repo"));
 }
 
 fn assert_prune_behavior(workspace: &Path, nested: &Path, config: &Path, checkout: &Path) {

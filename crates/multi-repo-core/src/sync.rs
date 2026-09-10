@@ -6,6 +6,7 @@ use tokio::task::JoinSet;
 use crate::config::{Config, SourceConfig, WORKSPACE_SOURCE_NAME, validate_repo_name};
 use crate::error::{Error, Result};
 use crate::git::{GitSyncResult, SyncAction, sync_repo};
+use crate::language;
 use crate::lock::acquire_workspace_lock;
 use crate::model::{RepoRecord, RepoSpec, RepoStatus};
 use crate::provider;
@@ -60,6 +61,7 @@ pub struct RepoSyncReport {
     pub id: String,
     pub action: Option<SyncAction>,
     pub detail: Option<String>,
+    pub warning: Option<String>,
     pub error: Option<String>,
 }
 
@@ -314,32 +316,53 @@ async fn synchronize_repo(
 ) -> RepoSyncReport {
     let id = repo.id.clone();
     let preserve_ready = repo.status == RepoStatus::Ready;
-    let result =
-        tokio::task::spawn_blocking(move || sync_repo(&repo, &temporary_root, fetch_all_branches))
-            .await
-            .map_err(|error| Error::Task(error.to_string()))
-            .and_then(|result| result);
+    let result = tokio::task::spawn_blocking(move || {
+        let git_result = sync_repo(&repo, &temporary_root, fetch_all_branches)?;
+        let detected_tags = git_result
+            .detected_default_branch
+            .as_deref()
+            .map(|branch| language::detect(&repo.local_path, branch));
+        Ok::<_, Error>((git_result, detected_tags))
+    })
+    .await
+    .map_err(|error| Error::Task(error.to_string()))
+    .and_then(|result| result);
     match result {
-        Ok(GitSyncResult {
-            action,
-            detail,
-            detected_default_branch,
-        }) => {
+        Ok((
+            GitSyncResult {
+                action,
+                detail,
+                detected_default_branch,
+            },
+            detected_tags,
+        )) => {
+            let (detected_tags, warning) = match detected_tags {
+                Some(Ok(tags)) => (Some(tags), None),
+                Some(Err(error)) => (None, Some(format!("language detection failed: {error}"))),
+                None => (None, None),
+            };
             let state_result = detected_default_branch
                 .as_deref()
                 .map_or(Ok(()), |branch| state.record_default_branch(&id, branch))
+                .and_then(|()| {
+                    detected_tags
+                        .as_ref()
+                        .map_or(Ok(()), |tags| state.replace_detected_tags(&id, tags))
+                })
                 .and_then(|()| state.mark_ready(&id));
             match state_result {
                 Ok(()) => RepoSyncReport {
                     id,
                     action: Some(action),
                     detail,
+                    warning,
                     error: None,
                 },
                 Err(error) => RepoSyncReport {
                     id,
                     action: Some(action),
                     detail,
+                    warning,
                     error: Some(error.to_string()),
                 },
             }
@@ -355,6 +378,7 @@ async fn synchronize_repo(
                 id,
                 action: None,
                 detail: None,
+                warning: None,
                 error: Some(format!("{message}{state_error}")),
             }
         }

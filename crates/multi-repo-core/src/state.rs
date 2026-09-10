@@ -51,6 +51,11 @@ impl State {
                 active INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (repo_id, source)
             ) STRICT;
+            CREATE TABLE IF NOT EXISTS repo_detected_tags (
+                repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (repo_id, tag)
+            ) STRICT;
             ",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -174,6 +179,20 @@ impl State {
         Ok(())
     }
 
+    pub(crate) fn replace_detected_tags(&self, id: &str, tags: &BTreeSet<String>) -> Result<()> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM repo_detected_tags WHERE repo_id = ?1", [id])?;
+        for tag in tags {
+            transaction.execute(
+                "INSERT INTO repo_detected_tags (repo_id, tag) VALUES (?1, ?2)",
+                params![id, tag],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Records a synchronization error, optionally retaining ready status.
     ///
     /// # Errors
@@ -286,7 +305,37 @@ fn list_repositories(connection: &Connection, include_inactive: bool) -> Result<
             .tags
             .extend(serde_json::from_str::<BTreeSet<String>>(&tags)?);
     }
+    merge_detected_tags(connection, &mut records)?;
     Ok(records.into_values().collect())
+}
+
+fn merge_detected_tags(
+    connection: &Connection,
+    records: &mut BTreeMap<String, RepoRecord>,
+) -> Result<()> {
+    let table_exists: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'table' AND name = 'repo_detected_tags'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !table_exists {
+        return Ok(());
+    }
+    let mut statement =
+        connection.prepare("SELECT repo_id, tag FROM repo_detected_tags ORDER BY repo_id, tag")?;
+    let tags = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for tag in tags {
+        let (repo_id, tag) = tag?;
+        if let Some(record) = records.get_mut(&repo_id) {
+            record.tags.insert(tag);
+        }
+    }
+    Ok(())
 }
 
 fn repo_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoRecord> {
@@ -414,5 +463,64 @@ mod tests {
         let records = State::list_existing(&state_dir).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, "one/org/repo");
+    }
+
+    #[test]
+    fn reads_existing_inventory_without_detected_tags_table() {
+        let temp = TempDir::new().unwrap();
+        let state_dir = temp.path().join("state");
+        let state = State::initialize(&state_dir).unwrap();
+        state
+            .reconcile_source(
+                "one",
+                &[spec("one", "org/repo", "host/org/repo")],
+                &temp.path().join("repos"),
+            )
+            .unwrap();
+        state
+            .connect()
+            .unwrap()
+            .execute("DROP TABLE repo_detected_tags", [])
+            .unwrap();
+
+        let records = State::list_existing(&state_dir).unwrap();
+
+        assert_eq!(records[0].tags, BTreeSet::from(["rust".into()]));
+    }
+
+    #[test]
+    fn detected_tags_are_replaced_without_changing_configured_tags() {
+        let temp = TempDir::new().unwrap();
+        let state = State::initialize(&temp.path().join("state")).unwrap();
+        state
+            .reconcile_source(
+                "one",
+                &[spec("one", "org/repo", "host/org/repo")],
+                &temp.path().join("repos"),
+            )
+            .unwrap();
+
+        state
+            .replace_detected_tags(
+                "one/org/repo",
+                &BTreeSet::from(["language:go".into(), "language:python".into()]),
+            )
+            .unwrap();
+        assert_eq!(
+            find_record(&state, "one/org/repo").tags,
+            BTreeSet::from([
+                "language:go".into(),
+                "language:python".into(),
+                "rust".into(),
+            ])
+        );
+
+        state
+            .replace_detected_tags("one/org/repo", &BTreeSet::from(["language:go".into()]))
+            .unwrap();
+        assert_eq!(
+            find_record(&state, "one/org/repo").tags,
+            BTreeSet::from(["language:go".into(), "rust".into()])
+        );
     }
 }

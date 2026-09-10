@@ -144,6 +144,15 @@ pub(crate) fn sync_repo(
     }
 }
 
+pub(crate) fn files_at_revision(path: &Path, revision: &str) -> Result<Vec<String>> {
+    Ok(
+        git_stdout(path, ["ls-tree", "-r", "--name-only", "-z", revision])?
+            .split_terminator('\0')
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
 pub(crate) fn working_tree_is_clean(path: &Path) -> Result<bool> {
     if !path.join(".git").exists() {
         return Err(Error::Git(format!(

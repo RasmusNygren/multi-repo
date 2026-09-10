@@ -227,6 +227,9 @@ async fn run_sync(config: &Config, args: &SyncArgs) -> multi_repo_core::Result<u
         } else {
             println!("{}: {action}", repo.id);
         }
+        if let Some(warning) = &repo.warning {
+            eprintln!("{}: warning: {warning}", repo.id);
+        }
     }
     if let Some(preview) = &report.preview {
         if preview.changes.is_empty() {

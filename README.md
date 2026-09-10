@@ -8,7 +8,8 @@ It can:
 - discover repositories from GitHub, GitHub Enterprise, Bitbucket Server/Data
   Center 8.19, or a TOML manifest;
 - clone, fetch, and safely fast-forward repositories without overwriting local
-  work; and
+  work;
+- automatically identify Python, Go, and Rust repositories; and
 - search every repository in parallel with ripgrep-compatible matching.
 
 `multi-repo` supports macOS and Linux.
@@ -73,6 +74,21 @@ multi-repo grep TODO --repo 'github/your-org/*'
 multi-repo grep -F 'edition = "2024"' --tag rust -g Cargo.toml
 multi-repo grep error -C 2 -- src tests
 ```
+
+Every successful sync detects Python, Go, and Rust projects from files tracked
+on the fetched default branch. Detected repositories receive `language:python`,
+`language:go`, or `language:rust` tags and can be selected like any explicitly
+configured tag:
+
+```console
+multi-repo list --tag language:python
+multi-repo grep TODO --tag language:go
+```
+
+A repository can receive more than one language tag. Dependency directories
+such as `vendor`, `.venv`, and `target` do not affect detection. Each language
+requires both a project marker and a matching source file: `go.mod` and `.go`,
+Python project metadata and `.py`, or `Cargo.toml` and `.rs`.
 
 Review repositories that disappeared from their source, then remove those that
 are safe to delete:
