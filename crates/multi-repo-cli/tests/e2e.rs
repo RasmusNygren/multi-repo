@@ -33,7 +33,7 @@ fn assert_branch_fetch_behavior(all_branches_on_clone: bool, default_branch: &st
 
     let config = temp.path().join(".multi-repo.toml");
     let manifest = format!(
-        "version = 1\n\n[[repo]]\nid = \"repo\"\nurl = {:?}\n{default_branch}",
+        "[[repo]]\nid = \"repo\"\nurl = {:?}\n{default_branch}",
         text(&remote)
     );
     fs::write(temp.path().join("repos.toml"), manifest).unwrap();
@@ -43,7 +43,7 @@ fn assert_branch_fetch_behavior(all_branches_on_clone: bool, default_branch: &st
         ""
     };
     let source = "\n[[source]]\nname = \"catalog\"\nkind = \"manifest\"\npath = \"repos.toml\"\n";
-    fs::write(&config, format!("version = 1\n{source}{setting}")).unwrap();
+    fs::write(&config, format!("{source}{setting}")).unwrap();
     assert_success(&command(temp.path(), ["sync"]));
     let checkout = temp.path().join("repos/catalog/repo");
     let main_head = git_revision(&seed, "main");
@@ -68,11 +68,7 @@ fn assert_branch_fetch_behavior(all_branches_on_clone: bool, default_branch: &st
         }
     );
 
-    fs::write(
-        &config,
-        format!("version = 1\n{source}fetch_all_branches = true\n"),
-    )
-    .unwrap();
+    fs::write(&config, format!("{source}fetch_all_branches = true\n")).unwrap();
     assert_success(&command(temp.path(), ["sync"]));
     assert_eq!(
         git_revision(&checkout, "origin/feature/topic"),
@@ -155,7 +151,7 @@ fn inline_repository_sync_list_and_working_tree_search() {
     fs::write(
         &config,
         format!(
-            "version = 1\n\n[[repo]]\nid = \"acme/repo\"\nurl = {:?}\ndefault_branch = \"main\"\ntags = [\"test\"]\n",
+            "[[repo]]\nid = \"acme/repo\"\nurl = {:?}\ndefault_branch = \"main\"\ntags = [\"test\"]\n",
             text(&remote)
         ),
     )
@@ -234,7 +230,7 @@ fn assert_prune_behavior(workspace: &Path, nested: &Path, config: &Path, checkou
     assert!(!orphan.exists());
     assert!(checkout.exists());
 
-    fs::write(config, "version = 1\n").unwrap();
+    fs::write(config, "").unwrap();
     let dry_sync = command(nested, ["sync", "--dry-run"]);
     assert_success(&dry_sync);
     assert!(String::from_utf8_lossy(&dry_sync.stdout).contains("  - acme/repo"));

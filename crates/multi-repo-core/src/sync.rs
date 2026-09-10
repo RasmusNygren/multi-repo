@@ -438,7 +438,6 @@ mod tests {
     #[test]
     fn fetches_all_branches_when_any_associated_source_enables_it() {
         let config = Config {
-            version: 1,
             root: PathBuf::from("workspace"),
             sources: vec![
                 SourceConfig::Manifest(ManifestConfig {

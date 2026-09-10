@@ -7,13 +7,11 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::model::CloneProtocol;
 
-pub const CONFIG_VERSION: u32 = 1;
 pub const CONFIG_FILE_NAME: &str = ".multi-repo.toml";
 pub(crate) const WORKSPACE_SOURCE_NAME: &str = "workspace";
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub version: u32,
     pub root: PathBuf,
     pub sources: Vec<SourceConfig>,
     pub repositories: Vec<RepositoryConfig>,
@@ -22,7 +20,6 @@ pub struct Config {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
-    version: u32,
     root: Option<PathBuf>,
     #[serde(default, rename = "source")]
     sources: Vec<SourceConfig>,
@@ -187,16 +184,9 @@ impl Config {
             source,
         })?;
         let file: ConfigFile = toml::from_str(&contents)?;
-        if file.version != CONFIG_VERSION {
-            return Err(Error::Config(format!(
-                "unsupported config version {}; expected {CONFIG_VERSION}",
-                file.version
-            )));
-        }
 
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         let mut config = Self {
-            version: file.version,
             root: match file.root {
                 Some(root) => resolve_path(base, &root)?,
                 None => base.to_path_buf(),
@@ -508,7 +498,7 @@ mod tests {
             std::fs::write(
                 &path,
                 format!(
-                    "version = 1\n\n[[source]]\nname = \"catalog\"\nkind = \"manifest\"\npath = \"repos.toml\"\n{setting}"
+                    "[[source]]\nname = \"catalog\"\nkind = \"manifest\"\npath = \"repos.toml\"\n{setting}"
                 ),
             )
             .unwrap();
@@ -519,13 +509,24 @@ mod tests {
         }
         std::fs::write(
             &path,
-            "version = 1\n\n[[source]]\nname = \"catalog\"\nkind = \"manifest\"\npath = \"repos.toml\"\nfetch_all_branches = \"true\"\n",
+            "[[source]]\nname = \"catalog\"\nkind = \"manifest\"\npath = \"repos.toml\"\nfetch_all_branches = \"true\"\n",
         )
         .unwrap();
         assert!(Config::load(Some(&path)).is_err());
 
-        std::fs::write(&path, "version = 1\nfetch_all_branches = true\n").unwrap();
+        std::fs::write(&path, "fetch_all_branches = true\n").unwrap();
         assert!(Config::load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn rejects_obsolete_version_setting() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&path, "version = 1\n").unwrap();
+
+        let error = Config::load(Some(&path)).unwrap_err().to_string();
+
+        assert!(error.contains("unknown field `version`"));
     }
 
     #[test]
@@ -535,19 +536,19 @@ mod tests {
         let nested = workspace.join("repos/source/org/repo");
         std::fs::create_dir_all(&nested).unwrap();
         let path = workspace.join(CONFIG_FILE_NAME);
-        std::fs::write(&path, "version = 1\n").unwrap();
+        std::fs::write(&path, "").unwrap();
 
         assert_eq!(find_config(&nested).unwrap(), path);
         assert_eq!(Config::load(Some(&path)).unwrap().root, workspace);
 
-        std::fs::write(&path, "version = 1\nroot = \"managed\"\n").unwrap();
+        std::fs::write(&path, "root = \"managed\"\n").unwrap();
         assert_eq!(
             Config::load(Some(&path)).unwrap().root,
             workspace.join("managed")
         );
 
         let child_path = workspace.join("repos/source").join(CONFIG_FILE_NAME);
-        std::fs::write(&child_path, "version = 1\n").unwrap();
+        std::fs::write(&child_path, "").unwrap();
         assert_eq!(find_config(&nested).unwrap(), child_path);
     }
 
@@ -567,7 +568,7 @@ mod tests {
         let path = workspace.join(CONFIG_FILE_NAME);
         std::fs::write(
             &path,
-            "version = 1\n\n[[repo]]\nid = \"widget\"\nurl = \"local/widget.git\"\n",
+            "[[repo]]\nid = \"widget\"\nurl = \"local/widget.git\"\n",
         )
         .unwrap();
 
@@ -582,7 +583,7 @@ mod tests {
     #[test]
     fn parses_minimal_github_source() {
         let file: ConfigFile = toml::from_str(
-            "version = 1\n\n[[source]]\nname = \"github\"\nkind = \"github\"\ntoken_env = \"GITHUB_TOKEN\"\n",
+            "[[source]]\nname = \"github\"\nkind = \"github\"\ntoken_env = \"GITHUB_TOKEN\"\n",
         )
         .unwrap();
 
@@ -600,8 +601,7 @@ mod tests {
         std::fs::write(
             &path,
             concat!(
-                "version = 1\n",
-                "\n[[source]]\n",
+                "[[source]]\n",
                 "name = \"github\"\n",
                 "kind = \"github\"\n",
                 "token = \"github-inline-secret\"\n",
@@ -645,9 +645,7 @@ mod tests {
         ] {
             std::fs::write(
                 &path,
-                format!(
-                    "version = 1\n\n[[source]]\nname = \"github\"\nkind = \"github\"\n{credentials}"
-                ),
+                format!("[[source]]\nname = \"github\"\nkind = \"github\"\n{credentials}"),
             )
             .unwrap();
 

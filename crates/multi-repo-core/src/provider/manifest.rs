@@ -28,12 +28,6 @@ impl ManifestSource {
             source,
         })?;
         let mut manifest: Manifest = toml::from_str(&contents)?;
-        if manifest.version != 1 {
-            return Err(Error::Config(format!(
-                "unsupported manifest version {}; expected 1",
-                manifest.version
-            )));
-        }
         let base = self
             .path
             .parent()
@@ -54,7 +48,6 @@ impl ManifestSource {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
-    version: u32,
     #[serde(default, rename = "repo")]
     repos: Vec<RepositoryConfig>,
 }
@@ -73,7 +66,7 @@ mod tests {
         let path = directory.join("repos.toml");
         std::fs::write(
             &path,
-            "version = 1\n\n[[repo]]\nid = \"acme/widget\"\nurl = \"../widget.git\"\ntags = [\"specific\"]\n",
+            "[[repo]]\nid = \"acme/widget\"\nurl = \"../widget.git\"\ntags = [\"specific\"]\n",
         )
         .unwrap();
         let source = ManifestSource::new(&ManifestConfig {
@@ -95,5 +88,10 @@ mod tests {
             repositories[0].tags,
             ["default".to_owned(), "specific".to_owned()].into()
         );
+    }
+
+    #[test]
+    fn rejects_obsolete_version_setting() {
+        assert!(toml::from_str::<Manifest>("version = 1\n").is_err());
     }
 }

@@ -1,5 +1,3 @@
-version = 1
-
 [[source]]
 name = "github"
 kind = "github"

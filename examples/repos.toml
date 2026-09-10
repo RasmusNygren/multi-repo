@@ -1,5 +1,3 @@
-version = 1
-
 [[repo]]
 id = "acme/widget"
 url = "git@github.com:acme/widget.git"

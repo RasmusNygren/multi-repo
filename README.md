@@ -34,8 +34,6 @@ cd ~/multi-repo-workspace
 Create `.multi-repo.toml`, replacing the token and organization with your own:
 
 ```toml
-version = 1
-
 [[source]]
 name = "github"
 kind = "github"
@@ -110,7 +108,6 @@ directory is also the workspace root.
 
 | Setting | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | — | Configuration format version. The only supported value is `1`. |
 | `root` | path | no | configuration directory | Directory that contains `repos/` and `.multi-repo/`. |
 | `[[source]]` | array of tables | no | `[]` | Repository discovery sources. See the source types below. |
 | `[[repo]]` | array of tables | no | `[]` | Repositories declared directly in the workspace configuration. |
@@ -126,8 +123,6 @@ fetch only their default branch.
 To fetch all branches for a source, add this setting to its `[[source]]` table:
 
 ```toml
-version = 1
-
 [[source]]
 name = "catalog"
 kind = "manifest"
@@ -216,8 +211,9 @@ Bitbucket repositories receive IDs in the form
 
 ### Manifest source
 
-Use a manifest when the repository list is generated or shared separately from
-the workspace configuration:
+Use a manifest only when the repository list is generated or shared separately
+from the workspace configuration. For a hand-maintained list, put `[[repo]]`
+entries directly in `.multi-repo.toml` instead.
 
 ```toml
 [[source]]
@@ -239,8 +235,6 @@ tags = ["catalog"]
 The manifest uses the same `[[repo]]` format as the workspace configuration:
 
 ```toml
-version = 1
-
 [[repo]]
 id = "acme/widget"
 url = "git@github.com:acme/widget.git"
@@ -248,7 +242,6 @@ default_branch = "main"
 tags = ["rust", "service"]
 ```
 
-The manifest's top-level `version` setting is required and must be `1`.
 Manifest repository IDs are prefixed with the source name. Relative local
 repository URLs in a manifest are resolved from the manifest's directory.
 
