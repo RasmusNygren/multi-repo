@@ -78,6 +78,7 @@ mod tests {
         .unwrap();
         let source = ManifestSource::new(&ManifestConfig {
             name: "generated".into(),
+            fetch_all_branches: false,
             path,
             tags: vec!["default".into()],
         });

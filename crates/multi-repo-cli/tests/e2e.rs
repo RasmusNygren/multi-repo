@@ -32,18 +32,20 @@ fn assert_branch_fetch_behavior(all_branches_on_clone: bool, default_branch: &st
     git(&seed, ["push", "origin", "main", "feature/topic"]);
 
     let config = temp.path().join(".multi-repo.toml");
-    let repositories = format!(
-        "\n[[repo]]\nid = \"repo\"\nurl = {:?}\n{default_branch}",
+    let manifest = format!(
+        "version = 1\n\n[[repo]]\nid = \"repo\"\nurl = {:?}\n{default_branch}",
         text(&remote)
     );
+    fs::write(temp.path().join("repos.toml"), manifest).unwrap();
     let setting = if all_branches_on_clone {
         "fetch_all_branches = true\n"
     } else {
         ""
     };
-    fs::write(&config, format!("version = 1\n{setting}{repositories}")).unwrap();
+    let source = "\n[[source]]\nname = \"catalog\"\nkind = \"manifest\"\npath = \"repos.toml\"\n";
+    fs::write(&config, format!("version = 1\n{source}{setting}")).unwrap();
     assert_success(&command(temp.path(), ["sync"]));
-    let checkout = temp.path().join("repos/repo");
+    let checkout = temp.path().join("repos/catalog/repo");
     let main_head = git_revision(&seed, "main");
     assert_eq!(git_revision(&checkout, "HEAD"), main_head);
     assert_eq!(
@@ -68,7 +70,7 @@ fn assert_branch_fetch_behavior(all_branches_on_clone: bool, default_branch: &st
 
     fs::write(
         &config,
-        format!("version = 1\nfetch_all_branches = true\n{repositories}"),
+        format!("version = 1\n{source}fetch_all_branches = true\n"),
     )
     .unwrap();
     assert_success(&command(temp.path(), ["sync"]));

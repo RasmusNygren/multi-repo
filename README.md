@@ -112,18 +112,26 @@ directory is also the workspace root.
 | --- | --- | --- | --- | --- |
 | `version` | integer | yes | — | Configuration format version. The only supported value is `1`. |
 | `root` | path | no | configuration directory | Directory that contains `repos/` and `.multi-repo/`. |
-| `fetch_all_branches` | boolean | no | `false` | Clone and fetch all branches from `origin` instead of only the default branch. Applies to all repositories, including existing single-branch clones. |
 | `[[source]]` | array of tables | no | `[]` | Repository discovery sources. See the source types below. |
 | `[[repo]]` | array of tables | no | `[]` | Repositories declared directly in the workspace configuration. |
 
 Source names must be unique, must be a single safe path component, and cannot
 be `workspace`, which is reserved for directly declared repositories.
 
-To fetch all branches, add this setting before any `[[source]]` or `[[repo]]`
-tables in `.multi-repo.toml`:
+Each source can opt into fetching every branch. If multiple active sources
+discover the same repository, all branches are fetched when any associated
+source enables the setting. Repositories declared directly with `[[repo]]`
+fetch only their default branch.
+
+To fetch all branches for a source, add this setting to its `[[source]]` table:
 
 ```toml
 version = 1
+
+[[source]]
+name = "catalog"
+kind = "manifest"
+path = "repos.toml"
 fetch_all_branches = true
 ```
 
@@ -138,6 +146,7 @@ are not switched or updated.
 [[source]]
 name = "github"
 kind = "github"
+fetch_all_branches = false
 api_url = "https://api.github.com"
 token_env = "GITHUB_TOKEN"
 clone_protocol = "ssh"
@@ -153,6 +162,7 @@ tags = ["github"]
 | --- | --- | --- | --- | --- |
 | `name` | string | yes | — | Unique source name. Repository IDs begin with this value. |
 | `kind` | string | yes | — | Must be `"github"`. |
+| `fetch_all_branches` | boolean | no | `false` | Clone and fetch all branches from `origin`, including for existing single-branch clones. |
 | `api_url` | URL | no | `"https://api.github.com"` | REST API base URL. Set this for GitHub Enterprise. |
 | `token` | string | conditionally | — | Inline API token. Exactly one of `token` and `token_env` is required. |
 | `token_env` | string | conditionally | — | Name of an environment variable containing the API token. Exactly one of `token` and `token_env` is required. |
@@ -173,6 +183,7 @@ GitHub repositories receive IDs in the form
 [[source]]
 name = "bitbucket"
 kind = "bitbucket-server"
+fetch_all_branches = false
 base_url = "https://bitbucket.example.com"
 token_env = "BITBUCKET_TOKEN"
 clone_protocol = "ssh"
@@ -188,6 +199,7 @@ ca_bundle = "certificates/company-ca.pem"
 | --- | --- | --- | --- | --- |
 | `name` | string | yes | — | Unique source name. Repository IDs begin with this value. |
 | `kind` | string | yes | — | Must be `"bitbucket-server"`. |
+| `fetch_all_branches` | boolean | no | `false` | Clone and fetch all branches from `origin`, including for existing single-branch clones. |
 | `base_url` | URL | yes | — | Bitbucket Server or Data Center base URL. |
 | `token` | string | conditionally | — | Inline HTTP access token used as a bearer token. Exactly one of `token` and `token_env` is required. |
 | `token_env` | string | conditionally | — | Name of an environment variable containing the HTTP access token. Exactly one of `token` and `token_env` is required. |
@@ -212,6 +224,7 @@ the workspace configuration:
 name = "catalog"
 kind = "manifest"
 path = "repos.toml"
+fetch_all_branches = false
 tags = ["catalog"]
 ```
 
@@ -219,6 +232,7 @@ tags = ["catalog"]
 | --- | --- | --- | --- | --- |
 | `name` | string | yes | — | Unique source name. Repository IDs begin with this value. |
 | `kind` | string | yes | — | Must be `"manifest"`. |
+| `fetch_all_branches` | boolean | no | `false` | Clone and fetch all branches from `origin`, including for existing single-branch clones. |
 | `path` | path | yes | — | Path to the TOML manifest. |
 | `tags` | array of strings | no | `[]` | Tags added to every repository in the manifest. |
 

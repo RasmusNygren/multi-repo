@@ -15,8 +15,6 @@ pub(crate) const WORKSPACE_SOURCE_NAME: &str = "workspace";
 pub struct Config {
     pub version: u32,
     pub root: PathBuf,
-    /// Fetch all origin branches, including when cloning new repositories.
-    pub fetch_all_branches: bool,
     pub sources: Vec<SourceConfig>,
     pub repositories: Vec<RepositoryConfig>,
 }
@@ -26,8 +24,6 @@ pub struct Config {
 struct ConfigFile {
     version: u32,
     root: Option<PathBuf>,
-    #[serde(default)]
-    fetch_all_branches: bool,
     #[serde(default, rename = "source")]
     sources: Vec<SourceConfig>,
     #[serde(default, rename = "repo")]
@@ -45,8 +41,14 @@ pub enum SourceConfig {
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the fields mirror independent boolean source settings"
+)]
 pub struct GitHubConfig {
     pub name: String,
+    #[serde(default)]
+    pub fetch_all_branches: bool,
     #[serde(default = "default_github_api_url")]
     pub api_url: String,
     pub token: Option<String>,
@@ -71,6 +73,8 @@ pub struct GitHubConfig {
 #[serde(deny_unknown_fields)]
 pub struct BitbucketServerConfig {
     pub name: String,
+    #[serde(default)]
+    pub fetch_all_branches: bool,
     pub base_url: String,
     pub token: Option<String>,
     pub token_env: Option<String>,
@@ -93,6 +97,8 @@ pub struct BitbucketServerConfig {
 #[serde(deny_unknown_fields)]
 pub struct ManifestConfig {
     pub name: String,
+    #[serde(default)]
+    pub fetch_all_branches: bool,
     pub path: PathBuf,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -121,6 +127,7 @@ impl fmt::Debug for GitHubConfig {
         formatter
             .debug_struct("GitHubConfig")
             .field("name", &self.name)
+            .field("fetch_all_branches", &self.fetch_all_branches)
             .field("api_url", &self.api_url)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
             .field("token_env", &self.token_env)
@@ -140,6 +147,7 @@ impl fmt::Debug for BitbucketServerConfig {
         formatter
             .debug_struct("BitbucketServerConfig")
             .field("name", &self.name)
+            .field("fetch_all_branches", &self.fetch_all_branches)
             .field("base_url", &self.base_url)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
             .field("token_env", &self.token_env)
@@ -194,7 +202,6 @@ impl Config {
                 None => base.to_path_buf(),
             },
             sources: file.sources,
-            fetch_all_branches: file.fetch_all_branches,
             repositories: file.repositories,
         };
         let mut names = HashSet::new();
@@ -254,6 +261,15 @@ impl SourceConfig {
             Self::GitHub(config) => &config.name,
             Self::BitbucketServer(config) => &config.name,
             Self::Manifest(config) => &config.name,
+        }
+    }
+
+    #[must_use]
+    pub const fn fetch_all_branches(&self) -> bool {
+        match self {
+            Self::GitHub(config) => config.fetch_all_branches,
+            Self::BitbucketServer(config) => config.fetch_all_branches,
+            Self::Manifest(config) => config.fetch_all_branches,
         }
     }
 
@@ -481,7 +497,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loads_fetch_all_branches_with_backwards_compatible_default() {
+    fn loads_fetch_all_branches_per_source_with_default() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join(CONFIG_FILE_NAME);
         for (setting, expected) in [
@@ -489,13 +505,26 @@ mod tests {
             ("fetch_all_branches = false\n", false),
             ("fetch_all_branches = true\n", true),
         ] {
-            std::fs::write(&path, format!("version = 1\n{setting}")).unwrap();
+            std::fs::write(
+                &path,
+                format!(
+                    "version = 1\n\n[[source]]\nname = \"catalog\"\nkind = \"manifest\"\npath = \"repos.toml\"\n{setting}"
+                ),
+            )
+            .unwrap();
             assert_eq!(
-                Config::load(Some(&path)).unwrap().fetch_all_branches,
+                Config::load(Some(&path)).unwrap().sources[0].fetch_all_branches(),
                 expected
             );
         }
-        std::fs::write(&path, "version = 1\nfetch_all_branches = \"true\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "version = 1\n\n[[source]]\nname = \"catalog\"\nkind = \"manifest\"\npath = \"repos.toml\"\nfetch_all_branches = \"true\"\n",
+        )
+        .unwrap();
+        assert!(Config::load(Some(&path)).is_err());
+
+        std::fs::write(&path, "version = 1\nfetch_all_branches = true\n").unwrap();
         assert!(Config::load(Some(&path)).is_err());
     }
 

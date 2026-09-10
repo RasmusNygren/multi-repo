@@ -1,10 +1,10 @@
 version = 1
-# Set to true to clone and fetch all origin branches, including in existing clones.
-fetch_all_branches = false
 
 [[source]]
 name = "github"
 kind = "github"
+# Set to true to clone and fetch all origin branches for this source.
+fetch_all_branches = false
 api_url = "https://api.github.com"
 # For a local-only configuration, this can instead be `token = "..."`.
 token_env = "GITHUB_TOKEN"
@@ -15,6 +15,7 @@ include_archived = false
 [[source]]
 name = "stash"
 kind = "bitbucket-server"
+fetch_all_branches = false
 base_url = "https://stash.example.com"
 # For a local-only configuration, this can instead be `token = "..."`.
 token_env = "BITBUCKET_TOKEN"

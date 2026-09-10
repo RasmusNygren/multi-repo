@@ -166,16 +166,11 @@ pub async fn synchronize_with_progress(
     }
 
     let state = State::initialize(&config.state_dir())?;
-    let mut desired = BTreeMap::<String, RepoRecord>::new();
-    for (source, specs) in successful {
-        for repo in state.reconcile_source(&source, &specs, &config.repos_dir())? {
-            desired.insert(repo.id.clone(), repo);
-        }
-    }
+    let desired = reconcile_repositories(&state, config, successful)?;
     let total = desired.len();
     let mut completed = 0;
     progress(SyncProgress::Repositories { completed, total });
-    let mut pending = desired.into_values();
+    let mut pending = desired.into_iter();
     let mut sync_tasks = JoinSet::new();
     for repo in pending.by_ref().take(options.jobs.max(1)) {
         spawn_sync_task(&mut sync_tasks, repo, state.clone(), config);
@@ -192,6 +187,24 @@ pub async fn synchronize_with_progress(
     }
     report.repos.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(report)
+}
+
+fn reconcile_repositories(
+    state: &State,
+    config: &Config,
+    successful: Vec<(String, Vec<RepoSpec>)>,
+) -> Result<Vec<RepoRecord>> {
+    let mut desired_ids = BTreeSet::new();
+    for (source, specs) in successful {
+        for repo in state.reconcile_source(&source, &specs, &config.repos_dir())? {
+            desired_ids.insert(repo.id);
+        }
+    }
+    Ok(state
+        .list(false)?
+        .into_iter()
+        .filter(|repo| desired_ids.contains(&repo.id))
+        .collect())
 }
 
 fn preview_reconciliation(
@@ -277,12 +290,20 @@ fn spawn_sync_task(
     state: State,
     config: &Config,
 ) {
+    let fetch_all_branches = fetch_all_branches(config, &repo);
     tasks.spawn(synchronize_repo(
         repo,
         state,
         config.state_dir().join("tmp"),
-        config.fetch_all_branches,
+        fetch_all_branches,
     ));
+}
+
+fn fetch_all_branches(config: &Config, repo: &RepoRecord) -> bool {
+    config
+        .sources
+        .iter()
+        .any(|source| source.fetch_all_branches() && repo.sources.contains(source.name()))
 }
 
 async fn synchronize_repo(
@@ -343,6 +364,7 @@ async fn synchronize_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ManifestConfig;
 
     fn record(id: &str, url: &str, active: bool, sources: &[&str]) -> RepoRecord {
         RepoRecord {
@@ -411,5 +433,46 @@ mod tests {
                 unchanged: 1,
             }
         );
+    }
+
+    #[test]
+    fn fetches_all_branches_when_any_associated_source_enables_it() {
+        let config = Config {
+            version: 1,
+            root: PathBuf::from("workspace"),
+            sources: vec![
+                SourceConfig::Manifest(ManifestConfig {
+                    name: "default-only".into(),
+                    fetch_all_branches: false,
+                    path: PathBuf::from("default.toml"),
+                    tags: Vec::new(),
+                }),
+                SourceConfig::Manifest(ManifestConfig {
+                    name: "all-branches".into(),
+                    fetch_all_branches: true,
+                    path: PathBuf::from("all.toml"),
+                    tags: Vec::new(),
+                }),
+            ],
+            repositories: Vec::new(),
+        };
+
+        assert!(!fetch_all_branches(
+            &config,
+            &record("default", "host/default", true, &["default-only"]),
+        ));
+        assert!(fetch_all_branches(
+            &config,
+            &record(
+                "shared",
+                "host/shared",
+                true,
+                &["default-only", "all-branches"],
+            ),
+        ));
+        assert!(!fetch_all_branches(
+            &config,
+            &record("inline", "host/inline", true, &[WORKSPACE_SOURCE_NAME]),
+        ));
     }
 }
