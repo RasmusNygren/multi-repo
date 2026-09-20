@@ -229,7 +229,87 @@ fn inline_repository_sync_list_and_working_tree_search() {
     assert_eq!(no_match.status.code(), Some(1));
     assert!(no_match.stdout.is_empty());
 
+    assert_search_buffering(&nested, &checkout);
     assert_prune_behavior(&workspace, &nested, &config, &checkout);
+}
+
+fn assert_search_buffering(directory: &Path, checkout: &Path) {
+    // Small results only reach stdout during the final buffer flush.
+    #[cfg(unix)]
+    for sort in [false, true] {
+        let mut args = vec!["grep", "needle"];
+        if sort {
+            args.push("--sort-path");
+        }
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(reader);
+        let closed_pipe = Command::new(env!("CARGO_BIN_EXE_multi-repo"))
+            .current_dir(directory)
+            .args(&args)
+            .stdout(std::os::fd::OwnedFd::from(writer))
+            .output()
+            .unwrap();
+        assert_success(&closed_pipe);
+        assert!(closed_pipe.stderr.is_empty());
+
+        #[cfg(target_os = "linux")]
+        {
+            let failed = Command::new(env!("CARGO_BIN_EXE_multi-repo"))
+                .current_dir(directory)
+                .args(&args)
+                .stdout(
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open("/dev/full")
+                        .unwrap(),
+                )
+                .output()
+                .unwrap();
+            assert_eq!(failed.status.code(), Some(2));
+            assert!(String::from_utf8_lossy(&failed.stderr).contains("<stdout>"));
+        }
+    }
+
+    // Cross buffer boundaries and leave a final partial buffer in both output modes.
+    fs::write(
+        checkout.join("local.txt"),
+        "needle from untracked\n".repeat(400),
+    )
+    .unwrap();
+    let mut expected = vec!["acme/repo:README.md:1:1:needle from remote".to_owned()];
+    expected.extend(
+        (1..=400).map(|line| format!("acme/repo:local.txt:{line}:1:needle from untracked")),
+    );
+    expected.sort();
+    for sort in [false, true] {
+        let mut args = vec!["grep", "needle"];
+        if sort {
+            args.push("--sort-path");
+        }
+        let output = command(directory, &args);
+        assert_success(&output);
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.ends_with('\n'));
+        let mut lines = stdout.lines().collect::<Vec<_>>();
+        lines.sort_unstable();
+        assert_eq!(lines, expected);
+
+        args.push("--json");
+        let output = command(directory, &args);
+        assert_success(&output);
+        let events = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(events.lines().count(), 401);
+        for line in events.lines() {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(event["type"], "match");
+        }
+    }
+    let counts = command(directory, ["grep", "needle", "--count", "--sort-path"]);
+    assert_success(&counts);
+    assert_eq!(
+        counts.stdout,
+        b"acme/repo:README.md:1\nacme/repo:local.txt:400\n"
+    );
 }
 
 fn assert_detected_language_changes(seed: &Path, nested: &Path) {

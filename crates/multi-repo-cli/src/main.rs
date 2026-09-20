@@ -423,16 +423,25 @@ struct Output {
     json: bool,
     color: bool,
     sort: bool,
+    stdout: Mutex<io::BufWriter<io::Stdout>>,
     buffered: Mutex<Vec<SearchEvent>>,
     error: Mutex<Option<io::Error>>,
 }
 
 impl Output {
     fn new(json: bool, color: bool, sort: bool) -> Self {
+        let stdout = io::stdout();
+        let stdout = if stdout.is_terminal() {
+            // Leave terminal line buffering to stdout itself.
+            io::BufWriter::with_capacity(0, stdout)
+        } else {
+            io::BufWriter::new(stdout)
+        };
         Self {
             json,
             color,
             sort,
+            stdout: Mutex::new(stdout),
             buffered: Mutex::new(Vec::new()),
             error: Mutex::new(None),
         }
@@ -455,7 +464,11 @@ impl Output {
                 Err(_) => self.record_error(io::Error::other("output buffer lock poisoned")),
             }
         } else {
-            let result = write_event(&mut io::stdout().lock(), &event, self.json, self.color);
+            let result = self
+                .stdout
+                .lock()
+                .map_err(|_| io::Error::other("stdout lock poisoned"))
+                .and_then(|mut stdout| write_event(&mut *stdout, &event, self.json, self.color));
             if let Err(error) = result {
                 self.record_error(error);
             }
@@ -463,6 +476,10 @@ impl Output {
     }
 
     fn finish(&self) -> multi_repo_core::Result<()> {
+        let mut stdout = self
+            .stdout
+            .lock()
+            .map_err(|_| Error::Task("stdout lock poisoned".into()))?;
         if self.sort {
             let mut events = {
                 let mut buffered = self
@@ -472,15 +489,14 @@ impl Output {
                 std::mem::take(&mut *buffered)
             };
             events.sort_by(compare_events);
-            let mut stdout = io::stdout().lock();
             for event in &events {
-                if let Err(error) = write_event(&mut stdout, event, self.json, self.color) {
+                if let Err(error) = write_event(&mut *stdout, event, self.json, self.color) {
                     self.record_error(error);
                     break;
                 }
             }
         }
-        if let Err(error) = io::stdout().flush() {
+        if let Err(error) = stdout.flush() {
             self.record_error(error);
         }
         let error = self

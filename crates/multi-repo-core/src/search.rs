@@ -307,6 +307,15 @@ struct EventSink<'a> {
     count: u64,
 }
 
+impl Drop for EventSink<'_> {
+    fn drop(&mut self) {
+        // Keep partial counts when a search stops early or fails to read a file.
+        if self.count > 0 {
+            self.matches.fetch_add(self.count, Ordering::Relaxed);
+        }
+    }
+}
+
 impl Sink for EventSink<'_> {
     type Error = std::io::Error;
 
@@ -316,7 +325,6 @@ impl Sink for EventSink<'_> {
         matched: &SinkMatch<'_>,
     ) -> std::result::Result<bool, Self::Error> {
         self.count += 1;
-        self.matches.fetch_add(1, Ordering::Relaxed);
         match self.mode {
             SearchOutputMode::Matches => {
                 let bytes = trim_line_ending(matched.bytes());
@@ -414,12 +422,71 @@ fn trim_line_ending(mut bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::io::{self, Read};
     use std::sync::Mutex;
 
     use tempfile::TempDir;
 
     use super::*;
     use crate::model::RepoStatus;
+
+    #[test]
+    fn counts_survive_completion_early_stop_and_read_errors() {
+        struct ReadError;
+        impl Read for ReadError {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("read failed"))
+            }
+        }
+
+        let matcher = build_matcher(&SearchOptions {
+            pattern: "needle".into(),
+            ..SearchOptions::default()
+        })
+        .unwrap();
+        let content = "needle\n".repeat(10_000);
+        for mode in [
+            SearchOutputMode::Matches,
+            SearchOutputMode::Count,
+            SearchOutputMode::FilesWithMatches,
+            SearchOutputMode::ReposWithMatches,
+        ] {
+            for fail in [false, true] {
+                let total = AtomicU64::new(0);
+                let reported_repos = Mutex::new(HashSet::new());
+                let sink = EventSink {
+                    repo: "test/repo",
+                    path: Path::new("file.txt"),
+                    matcher: &matcher,
+                    mode,
+                    reported_repos: &reported_repos,
+                    matches: &total,
+                    emit: &drop,
+                    count: 0,
+                };
+                let mut searcher = build_searcher(0, 0);
+                let result = if fail {
+                    searcher.search_reader(&matcher, content.as_bytes().chain(ReadError), sink)
+                } else {
+                    searcher.search_slice(&matcher, content.as_bytes(), sink)
+                };
+                let count = total.load(Ordering::Relaxed);
+                if matches!(
+                    mode,
+                    SearchOutputMode::FilesWithMatches | SearchOutputMode::ReposWithMatches
+                ) {
+                    assert!(result.is_ok());
+                    assert_eq!(count, 1);
+                } else if fail {
+                    assert!(result.is_err());
+                    assert!(count > 0 && count <= 10_000);
+                } else {
+                    assert!(result.is_ok());
+                    assert_eq!(count, 10_000);
+                }
+            }
+        }
+    }
 
     #[test]
     fn searches_dotfiles_and_untracked_but_respects_ignores() {
