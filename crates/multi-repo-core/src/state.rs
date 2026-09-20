@@ -256,19 +256,13 @@ impl State {
 }
 
 fn list_repositories(connection: &Connection, include_inactive: bool) -> Result<Vec<RepoRecord>> {
-    let sql = if include_inactive {
-        "SELECT id, canonical_url, clone_url, local_path, default_branch,
+    let sql = "SELECT id, canonical_url, clone_url, local_path, default_branch,
                 active, status, last_error
-         FROM repos ORDER BY id"
-    } else {
-        "SELECT id, canonical_url, clone_url, local_path, default_branch,
-                active, status, last_error
-         FROM repos WHERE active = 1 ORDER BY id"
-    };
+         FROM repos WHERE (?1 OR active = 1) ORDER BY id";
     let mut records = {
         let mut statement = connection.prepare(sql)?;
         statement
-            .query_map([], repo_from_row)?
+            .query_map([include_inactive], repo_from_row)?
             .map(|result| result.map(|repo| (repo.id.clone(), repo)))
             .collect::<std::result::Result<BTreeMap<_, _>, _>>()?
     };

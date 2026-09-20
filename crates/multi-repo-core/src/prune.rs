@@ -81,19 +81,11 @@ fn prune_repo(
     options: PruneOptions,
 ) -> RepoPruneReport {
     let result = prune_working_tree(state, repos_dir, repo, options);
-    match result {
-        Ok(action) => RepoPruneReport {
-            id: repo.id.clone(),
-            path: repo.local_path.clone(),
-            action: Some(action),
-            error: None,
-        },
-        Err(error) => RepoPruneReport {
-            id: repo.id.clone(),
-            path: repo.local_path.clone(),
-            action: None,
-            error: Some(error.to_string()),
-        },
+    RepoPruneReport {
+        id: repo.id.clone(),
+        path: repo.local_path.clone(),
+        action: result.as_ref().ok().copied(),
+        error: result.err().map(|error| error.to_string()),
     }
 }
 

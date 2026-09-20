@@ -348,21 +348,12 @@ async fn synchronize_repo(
                         .map_or(Ok(()), |tags| state.replace_detected_tags(&id, tags))
                 })
                 .and_then(|()| state.mark_ready(&id));
-            match state_result {
-                Ok(()) => RepoSyncReport {
-                    id,
-                    action: Some(action),
-                    detail,
-                    warning,
-                    error: None,
-                },
-                Err(error) => RepoSyncReport {
-                    id,
-                    action: Some(action),
-                    detail,
-                    warning,
-                    error: Some(error.to_string()),
-                },
+            RepoSyncReport {
+                id,
+                action: Some(action),
+                detail,
+                warning,
+                error: state_result.err().map(|error| error.to_string()),
             }
         }
         Err(error) => {

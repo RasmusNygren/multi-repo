@@ -60,7 +60,6 @@ fn repository_specs(
 struct Filters {
     include: GlobSet,
     exclude: GlobSet,
-    include_all: bool,
 }
 
 impl Filters {
@@ -68,12 +67,11 @@ impl Filters {
         Ok(Self {
             include: build_globs(include)?,
             exclude: build_globs(exclude)?,
-            include_all: include.is_empty(),
         })
     }
 
     fn matches(&self, value: &str) -> bool {
-        (self.include_all || self.include.is_match(value)) && !self.exclude.is_match(value)
+        (self.include.is_empty() || self.include.is_match(value)) && !self.exclude.is_match(value)
     }
 }
 

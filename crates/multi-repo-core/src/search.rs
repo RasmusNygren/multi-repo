@@ -266,7 +266,6 @@ fn is_file(entry: &DirEntry) -> bool {
 struct PathFilter {
     include: GlobSet,
     exclude: GlobSet,
-    has_include: bool,
     prefixes: Vec<PathBuf>,
 }
 
@@ -284,14 +283,13 @@ impl PathFilter {
         Ok(Self {
             include: build_globs(&includes)?,
             exclude: build_globs(&excludes)?,
-            has_include: !includes.is_empty(),
             prefixes: prefixes.to_vec(),
         })
     }
 
     fn matches(&self, path: &Path) -> bool {
         (self.prefixes.is_empty() || self.prefixes.iter().any(|prefix| path.starts_with(prefix)))
-            && (!self.has_include || self.include.is_match(path))
+            && (self.include.is_empty() || self.include.is_match(path))
             && !self.exclude.is_match(path)
     }
 }

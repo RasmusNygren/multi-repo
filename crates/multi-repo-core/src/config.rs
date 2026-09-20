@@ -445,19 +445,6 @@ pub(crate) fn validate_repo_name(name: &str) -> Result<()> {
         return Err(Error::Config(format!("unsafe repository name {name:?}")));
     }
     let path = Path::new(name);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir
-                    | Component::CurDir
-                    | Component::RootDir
-                    | Component::Prefix(_)
-            )
-        })
-    {
-        return Err(Error::Config(format!("unsafe repository name {name:?}")));
-    }
     for component in path.components() {
         let Component::Normal(value) = component else {
             return Err(Error::Config(format!("unsafe repository name {name:?}")));
