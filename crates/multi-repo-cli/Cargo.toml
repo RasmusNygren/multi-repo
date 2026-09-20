@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 base64.workspace = true
 clap.workspace = true
-multi-repo-core = { path = "../multi-repo-core" }
+multi-repo-core = { version = "0.1.0", path = "../multi-repo-core" }
 serde_json.workspace = true
 tokio.workspace = true
 

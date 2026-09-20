@@ -110,6 +110,11 @@ by `sync`. `prune` deletes only inactive Git working trees with no tracked or
 non-ignored untracked changes, local-only branch commits, stashes, or linked
 worktrees.
 
+Pruning also preserves local-only commits on a detached HEAD and rejects
+repository paths that resolve outside `repos/`. Removing a source from the
+configuration deactivates its repositories unless another source still keeps
+them active. A failed discovery retains that source's existing inventory.
+
 ## Configuration reference
 
 Commands look for the nearest `.multi-repo.toml` in the current directory or

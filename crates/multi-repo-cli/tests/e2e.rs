@@ -375,6 +375,21 @@ fn assert_prune_behavior(workspace: &Path, nested: &Path, config: &Path, checkou
     assert!(checkout.exists());
 
     git(checkout, ["reset", "--hard", "origin/main"]);
+    git(checkout, ["checkout", "--detach"]);
+    fs::write(checkout.join("README.md"), "detached local work\n").unwrap();
+    git(checkout, ["commit", "-am", "detached local work"]);
+    let detached_head = git_revision(checkout, "HEAD");
+    for args in [vec!["prune", "--dry-run"], vec!["prune"]] {
+        let output = command(nested, args);
+        assert_success(&output);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("local commits"));
+        assert_eq!(git_revision(checkout, "HEAD"), detached_head);
+    }
+    git(checkout, ["reset", "--hard", "origin/main"]);
+
+    #[cfg(unix)]
+    assert_prune_rejects_symlinks(workspace, nested, checkout);
+
     let dry_prune = command(nested, ["prune", "--dry-run"]);
     assert_success(&dry_prune);
     assert!(String::from_utf8_lossy(&dry_prune.stdout).contains("acme/repo: would delete"));
@@ -386,6 +401,29 @@ fn assert_prune_behavior(workspace: &Path, nested: &Path, config: &Path, checkou
     assert!(!checkout.exists());
     assert!(!workspace.join("repos").exists());
     assert!(command(nested, ["list", "--all"]).stdout.is_empty());
+}
+
+#[cfg(unix)]
+fn assert_prune_rejects_symlinks(workspace: &Path, nested: &Path, checkout: &Path) {
+    for relative in ["repos/acme", "repos/acme/repo", "repos"] {
+        let path = workspace.join(relative);
+        let outside = workspace.parent().unwrap().join("outside");
+        fs::rename(&path, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        let real_checkout = checkout.canonicalize().unwrap();
+        assert!(!real_checkout.starts_with(workspace.canonicalize().unwrap()));
+        for args in [vec!["prune", "--dry-run"], vec!["prune"]] {
+            let output = command(nested, args);
+            assert_eq!(output.status.code(), Some(2));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to prune"));
+            assert!(real_checkout.join("README.md").exists());
+            let inventory = command(nested, ["list", "--all"]);
+            assert_success(&inventory);
+            assert!(String::from_utf8_lossy(&inventory.stdout).contains("acme/repo (inactive)"));
+        }
+        fs::remove_file(&path).unwrap();
+        fs::rename(&outside, &path).unwrap();
+    }
 }
 
 fn command<I, S>(directory: &Path, args: I) -> Output

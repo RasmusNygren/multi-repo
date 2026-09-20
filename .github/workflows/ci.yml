@@ -41,3 +41,4 @@ jobs:
           toolchain: stable
       - run: cargo test --workspace --all-targets --locked
       - run: cargo build --workspace --release --locked
+      - run: cargo package --workspace --locked

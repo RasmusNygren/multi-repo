@@ -95,7 +95,7 @@ fn prune_working_tree(
     repo: &RepoRecord,
     options: PruneOptions,
 ) -> Result<PruneAction> {
-    if !repo.local_path.starts_with(repos_dir) {
+    if repos_dir.is_symlink() || !repo.local_path.starts_with(repos_dir) {
         return Err(Error::Config(format!(
             "refusing to prune {} outside managed repository directory {}",
             repo.local_path.display(),
@@ -124,16 +124,33 @@ fn prune_working_tree(
             repo.local_path.display()
         )));
     }
-    if !working_tree_is_clean(&repo.local_path)? {
+    let root = repos_dir.canonicalize().map_err(|source| Error::Read {
+        path: repos_dir.to_path_buf(),
+        source,
+    })?;
+    let path = repo
+        .local_path
+        .canonicalize()
+        .map_err(|source| Error::Read {
+            path: repo.local_path.clone(),
+            source,
+        })?;
+    if path == root || !path.starts_with(&root) {
+        return Err(Error::Config(format!(
+            "refusing to prune {} because it resolves outside the managed repository directory or to its root",
+            repo.local_path.display()
+        )));
+    }
+    if !working_tree_is_clean(&path)? {
         return Ok(PruneAction::SkippedDirty);
     }
-    if has_local_git_state(&repo.local_path)? {
+    if has_local_git_state(&path)? {
         return Ok(PruneAction::SkippedLocalState);
     }
     if options.dry_run {
         return Ok(PruneAction::WouldDelete);
     }
-    std::fs::remove_dir_all(&repo.local_path).map_err(|source| Error::Write {
+    std::fs::remove_dir_all(&path).map_err(|source| Error::Write {
         path: repo.local_path.clone(),
         source,
     })?;
@@ -145,7 +162,10 @@ fn remove_empty_managed_directories(
     directory: &Path,
     retained_repositories: &HashSet<PathBuf>,
 ) -> Result<()> {
-    if retained_repositories.contains(directory) || directory.join(".git").exists() {
+    if directory.is_symlink()
+        || retained_repositories.contains(directory)
+        || directory.join(".git").exists()
+    {
         return Ok(());
     }
     let entries = match std::fs::read_dir(directory) {

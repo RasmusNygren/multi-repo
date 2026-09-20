@@ -28,6 +28,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo test --workspace --all-targets --locked
 cargo build --workspace --release --locked
+cargo package --workspace --locked
 ```
 
 The search smoke test can also be run against a configured workspace:
@@ -51,3 +52,24 @@ Unit tests live alongside their modules. End-to-end command-line tests live in
 
 When behavior or configuration changes, update its tests, the configuration
 reference in `README.md`, and the files under `examples/` in the same change.
+
+## Publishing
+
+Keep the workspace version and the CLI's `multi-repo-core` dependency version
+in sync. After running the validation checks, verify and publish the core crate
+first:
+
+```console
+cargo publish -p multi-repo-core --locked --dry-run
+cargo publish -p multi-repo-core --locked
+```
+
+Once that version is available on crates.io, verify and publish the CLI:
+
+```console
+cargo publish -p multi-repo --locked --dry-run
+cargo publish -p multi-repo --locked
+```
+
+The CLI's packaged dependency resolves through crates.io, so its standalone
+packaging and publish dry run require the core version to be available there.

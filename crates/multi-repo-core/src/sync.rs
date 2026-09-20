@@ -161,8 +161,14 @@ pub async fn synchronize_with_progress(
     if config.repositories.is_empty() {
         successful.push((WORKSPACE_SOURCE_NAME.to_owned(), Vec::new()));
     }
+    let current = State::list_existing(&config.state_dir())?;
+    // Removed sources reconcile as empty; configured sources that failed do not.
+    successful.extend(
+        removed_sources(config, &current)
+            .into_iter()
+            .map(|source| (source, Vec::new())),
+    );
     if options.dry_run {
-        let current = State::list_existing(&config.state_dir())?;
         report.preview = Some(preview_reconciliation(&current, &successful)?);
         return Ok(report);
     }
@@ -189,6 +195,21 @@ pub async fn synchronize_with_progress(
     }
     report.repos.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(report)
+}
+
+fn removed_sources(config: &Config, current: &[RepoRecord]) -> BTreeSet<String> {
+    let configured = config
+        .sources
+        .iter()
+        .map(SourceConfig::name)
+        .chain(std::iter::once(WORKSPACE_SOURCE_NAME))
+        .collect::<BTreeSet<_>>();
+    current
+        .iter()
+        .flat_map(|repo| &repo.sources)
+        .filter(|source| !configured.contains(source.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn reconcile_repositories(
@@ -486,5 +507,107 @@ mod tests {
             &config,
             &record("inline", "host/inline", true, &[WORKSPACE_SOURCE_NAME]),
         ));
+    }
+
+    #[tokio::test]
+    async fn retires_removed_sources_but_preserves_failed_sources_and_shared_repos() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = Config {
+            root: temp.path().to_path_buf(),
+            sources: vec![SourceConfig::Manifest(ManifestConfig {
+                name: "kept".into(),
+                fetch_all_branches: false,
+                path: temp.path().join("missing.toml"),
+                tags: Vec::new(),
+            })],
+            repositories: Vec::new(),
+        };
+        let state = State::initialize(&config.state_dir()).unwrap();
+        for (source, specs) in [
+            (
+                "removed",
+                vec![
+                    spec("removed/only", "host/only"),
+                    spec("removed/shared", "host/shared"),
+                ],
+            ),
+            (
+                "kept",
+                vec![
+                    spec("kept/only", "host/kept"),
+                    spec("kept/shared", "host/shared"),
+                ],
+            ),
+            (WORKSPACE_SOURCE_NAME, vec![spec("inline", "host/inline")]),
+        ] {
+            state
+                .reconcile_source(source, &specs, &config.repos_dir())
+                .unwrap();
+        }
+        let options = SyncOptions {
+            jobs: 1,
+            dry_run: true,
+        };
+        let preview = synchronize(&config, options).await.unwrap();
+        assert!(preview.failed());
+        assert_eq!(preview.sources[0].source, "kept");
+        assert_eq!(
+            preview.preview.unwrap().changes,
+            vec![
+                RepositoryChange {
+                    id: "inline".into(),
+                    kind: RepositoryChangeKind::Deactivate
+                },
+                RepositoryChange {
+                    id: "removed/only".into(),
+                    kind: RepositoryChangeKind::Deactivate
+                },
+            ]
+        );
+        assert_eq!(state.list(false).unwrap().len(), 4);
+
+        let report = synchronize(
+            &config,
+            SyncOptions {
+                dry_run: false,
+                ..options
+            },
+        )
+        .await
+        .unwrap();
+        assert!(report.failed());
+        assert!(report.repos.is_empty());
+        let active = state.list(false).unwrap();
+        assert_eq!(
+            active
+                .iter()
+                .map(|repo| repo.id.as_str())
+                .collect::<Vec<_>>(),
+            ["kept/only", "removed/shared"]
+        );
+        assert!(
+            active
+                .iter()
+                .all(|repo| repo.sources == BTreeSet::from(["kept".into()]))
+        );
+        assert_eq!(state.list(true).unwrap().len(), 4);
+
+        config.sources.clear();
+        let preview = synchronize(&config, options).await.unwrap();
+        assert!(!preview.failed());
+        assert_eq!(preview.preview.unwrap().changes.len(), 2);
+        assert_eq!(state.list(false).unwrap().len(), 2);
+        let report = synchronize(
+            &config,
+            SyncOptions {
+                dry_run: false,
+                ..options
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!report.failed());
+        assert!(state.list(false).unwrap().is_empty());
+        assert_eq!(state.list(true).unwrap().len(), 4);
     }
 }

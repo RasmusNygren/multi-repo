@@ -173,7 +173,14 @@ pub(crate) fn has_local_git_state(path: &Path) -> Result<bool> {
     }
     if git_stdout(
         path,
-        ["rev-list", "--count", "--branches", "--not", "--remotes"],
+        [
+            "rev-list",
+            "--count",
+            "HEAD",
+            "--branches",
+            "--not",
+            "--remotes",
+        ],
     )? != "0"
     {
         return Ok(true);
