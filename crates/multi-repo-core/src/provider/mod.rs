@@ -14,11 +14,11 @@ use crate::model::RepoSpec;
 
 pub(crate) async fn discover(config: &SourceConfig) -> Result<Vec<RepoSpec>> {
     match config {
-        SourceConfig::GitHub(config) => github::GitHubSource::new(config)?.discover().await,
+        SourceConfig::GitHub(config) => github::discover(config).await,
         SourceConfig::BitbucketServer(config) => {
             bitbucket::BitbucketSource::new(config)?.discover().await
         }
-        SourceConfig::Manifest(config) => manifest::ManifestSource::new(config).discover(),
+        SourceConfig::Manifest(config) => manifest::discover(config),
     }
 }
 
@@ -77,7 +77,7 @@ impl Filters {
     }
 }
 
-fn build_globs(values: &[String]) -> Result<GlobSet> {
+pub(crate) fn build_globs(values: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for value in values {
         builder.add(

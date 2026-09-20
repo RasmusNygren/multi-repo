@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::GlobSet;
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
@@ -11,6 +11,7 @@ use ignore::{DirEntry, WalkBuilder, WalkState};
 
 use crate::error::{Error, Result};
 use crate::model::RepoRecord;
+use crate::provider::build_globs;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SearchOutputMode {
@@ -107,7 +108,7 @@ pub struct RepoFilter {
 ///
 /// Returns an error if a repository glob is invalid.
 pub fn select_repos(repos: Vec<RepoRecord>, filter: &RepoFilter) -> Result<Vec<RepoRecord>> {
-    let repo_globs = build_glob_set(&filter.repo_globs)?;
+    let repo_globs = build_globs(&filter.repo_globs)?;
     Ok(repos
         .into_iter()
         .filter(|repo| {
@@ -137,18 +138,16 @@ pub fn search(
     if repos.is_empty() {
         return Ok(SearchStats::default());
     }
-    let roots: Arc<HashMap<PathBuf, RepoRecord>> = Arc::new(
-        repos
-            .iter()
-            .cloned()
-            .map(|repo| (repo.local_path.clone(), repo))
-            .collect(),
-    );
-    let matcher = Arc::new(build_matcher(options)?);
-    let path_filter = Arc::new(PathFilter::new(&options.globs, &options.path_prefixes)?);
-    let reported_repos = Arc::new(Mutex::new(HashSet::<String>::new()));
-    let match_count = Arc::new(AtomicU64::new(0));
-    let errors = Arc::new(AtomicU64::new(0));
+    let roots: HashMap<_, _> = repos
+        .iter()
+        .cloned()
+        .map(|repo| (repo.local_path.clone(), repo))
+        .collect();
+    let matcher = build_matcher(options)?;
+    let path_filter = PathFilter::new(&options.globs, &options.path_prefixes)?;
+    let reported_repos = Mutex::new(HashSet::<String>::new());
+    let match_count = AtomicU64::new(0);
+    let errors = AtomicU64::new(0);
     let mut walker = WalkBuilder::empty();
     for repo in repos {
         walker.add(&repo.local_path);
@@ -160,12 +159,12 @@ pub fn search(
         .threads(options.threads)
         .filter_entry(|entry| entry.file_name() != ".git");
     walker.build_parallel().run(|| {
-        let roots = Arc::clone(&roots);
-        let matcher = Arc::clone(&matcher);
-        let path_filter = Arc::clone(&path_filter);
-        let reported_repos = Arc::clone(&reported_repos);
-        let match_count = Arc::clone(&match_count);
-        let errors = Arc::clone(&errors);
+        let roots = &roots;
+        let matcher = &matcher;
+        let path_filter = &path_filter;
+        let reported_repos = &reported_repos;
+        let match_count = &match_count;
+        let errors = &errors;
         let output_mode = options.output_mode;
         let mut searcher = build_searcher(options.before_context, options.after_context);
         Box::new(move |entry| {
@@ -183,7 +182,7 @@ pub fn search(
             if !is_file(&entry) {
                 return WalkState::Continue;
             }
-            let Some(repo) = find_repo(entry.path(), &roots) else {
+            let Some(repo) = find_repo(entry.path(), roots) else {
                 return WalkState::Continue;
             };
             let Ok(relative) = entry.path().strip_prefix(&repo.local_path) else {
@@ -202,14 +201,14 @@ pub fn search(
             let sink = EventSink {
                 repo: &repo.id,
                 path: relative,
-                matcher: &matcher,
+                matcher,
                 mode: output_mode,
-                reported_repos: &reported_repos,
-                matches: &match_count,
-                emit: &emit,
+                reported_repos,
+                matches: match_count,
+                emit,
                 count: 0,
             };
-            if let Err(error) = searcher.search_path(&*matcher, entry.path(), sink) {
+            if let Err(error) = searcher.search_path(matcher, entry.path(), sink) {
                 errors.fetch_add(1, Ordering::Relaxed);
                 emit(SearchEvent::Error {
                     path: Some(entry.path().to_path_buf()),
@@ -283,8 +282,8 @@ impl PathFilter {
             .filter_map(|glob| glob.strip_prefix('!').map(str::to_owned))
             .collect::<Vec<_>>();
         Ok(Self {
-            include: build_glob_set(&includes)?,
-            exclude: build_glob_set(&excludes)?,
+            include: build_globs(&includes)?,
+            exclude: build_globs(&excludes)?,
             has_include: !includes.is_empty(),
             prefixes: prefixes.to_vec(),
         })
@@ -295,19 +294,6 @@ impl PathFilter {
             && (!self.has_include || self.include.is_match(path))
             && !self.exclude.is_match(path)
     }
-}
-
-fn build_glob_set(globs: &[String]) -> Result<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    for glob in globs {
-        builder.add(
-            Glob::new(glob)
-                .map_err(|error| Error::Config(format!("invalid glob {glob:?}: {error}")))?,
-        );
-    }
-    builder
-        .build()
-        .map_err(|error| Error::Config(format!("invalid glob set: {error}")))
 }
 
 struct EventSink<'a> {
@@ -459,9 +445,8 @@ mod tests {
             tags: BTreeSet::new(),
             last_error: None,
         };
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let output = Arc::clone(&events);
-        let emit = move |event| output.lock().unwrap().push(event);
+        let events = Mutex::new(Vec::new());
+        let emit = |event| events.lock().unwrap().push(event);
         let stats = search(
             &[repo],
             &SearchOptions {

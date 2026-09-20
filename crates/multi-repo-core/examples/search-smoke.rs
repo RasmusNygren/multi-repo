@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use multi_repo_core::search::{PatternKind, SearchEvent, SearchOptions, search};
@@ -53,11 +53,10 @@ fn main() -> multi_repo_core::Result<()> {
     timings.sort_unstable();
 
     let started = Instant::now();
-    let first_output = Arc::new(Mutex::new(None::<Duration>));
-    let captured = Arc::clone(&first_output);
-    let output = move |event| {
+    let first_output = Mutex::new(None::<Duration>);
+    let output = |event| {
         if matches!(event, SearchEvent::Match(_)) {
-            let mut first = captured.lock().expect("first-output lock");
+            let mut first = first_output.lock().expect("first-output lock");
             first.get_or_insert_with(|| started.elapsed());
         }
     };

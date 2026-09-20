@@ -35,14 +35,6 @@ pub enum RepoStatus {
 }
 
 impl RepoStatus {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Ready => "ready",
-            Self::Error => "error",
-        }
-    }
-
     pub(crate) fn parse(value: &str) -> crate::Result<Self> {
         match value {
             "pending" => Ok(Self::Pending),

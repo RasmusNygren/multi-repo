@@ -102,7 +102,7 @@ impl State {
         source: &str,
         specs: &[RepoSpec],
         repos_dir: &Path,
-    ) -> Result<Vec<RepoRecord>> {
+    ) -> Result<Vec<String>> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         transaction.execute(
@@ -150,15 +150,7 @@ impl State {
             [],
         )?;
         transaction.commit()?;
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ids = ids.into_iter().collect::<BTreeSet<_>>();
-        Ok(self
-            .list(true)?
-            .into_iter()
-            .filter(|repo| ids.contains(&repo.id))
-            .collect())
+        Ok(ids)
     }
 
     /// Marks a repository ready and clears its last synchronization error.
@@ -167,7 +159,12 @@ impl State {
     ///
     /// Returns an error if the database update fails.
     pub(crate) fn mark_ready(&self, id: &str) -> Result<()> {
-        self.set_result(id, RepoStatus::Ready, None)
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE repos SET status = 'ready', last_error = NULL WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn record_default_branch(&self, id: &str, branch: &str) -> Result<()> {
@@ -248,15 +245,6 @@ impl State {
             .into_iter()
             .filter(|repo| repo.status == RepoStatus::Ready && repo.local_path.is_dir())
             .collect())
-    }
-
-    fn set_result(&self, id: &str, status: RepoStatus, error: Option<&str>) -> Result<()> {
-        let connection = self.connect()?;
-        connection.execute(
-            "UPDATE repos SET status = ?2, last_error = ?3 WHERE id = ?1",
-            params![id, status.as_str(), error],
-        )?;
-        Ok(())
     }
 
     fn connect(&self) -> Result<Connection> {

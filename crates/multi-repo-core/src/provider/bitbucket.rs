@@ -8,19 +8,15 @@ use crate::config::BitbucketServerConfig;
 use crate::error::{Error, Result};
 use crate::model::{CloneProtocol, RepoSpec};
 
-pub(super) struct BitbucketSource {
-    name: String,
-    base_url: String,
+pub(super) struct BitbucketSource<'a> {
+    config: &'a BitbucketServerConfig,
     client: reqwest::Client,
-    protocol: CloneProtocol,
-    projects: Vec<String>,
     filters: Filters,
-    include_archived: bool,
     tags: BTreeSet<String>,
 }
 
-impl BitbucketSource {
-    pub(super) fn new(config: &BitbucketServerConfig) -> Result<Self> {
+impl<'a> BitbucketSource<'a> {
+    pub(super) fn new(config: &'a BitbucketServerConfig) -> Result<Self> {
         let token = config.access_token()?;
         let headers = authenticated_headers(&token, "application/json", "Bitbucket")?;
         let mut client = reqwest::Client::builder()
@@ -35,13 +31,9 @@ impl BitbucketSource {
             client = client.add_root_certificate(reqwest::Certificate::from_pem(&pem)?);
         }
         Ok(Self {
-            name: config.name.clone(),
-            base_url: config.base_url.trim_end_matches('/').to_owned(),
+            config,
             client: client.build()?,
-            protocol: config.clone_protocol,
-            projects: config.projects.clone(),
             filters: Filters::new(&config.include, &config.exclude)?,
-            include_archived: config.include_archived,
             tags: config.tags.iter().cloned().collect(),
         })
     }
@@ -65,10 +57,11 @@ impl BitbucketSource {
                 .await?;
             for repo in page.values {
                 let name = format!("{}/{}", repo.project.key, repo.slug);
-                if (!self.include_archived && repo.archived) || !self.filters.matches(&name) {
+                if (!self.config.include_archived && repo.archived) || !self.filters.matches(&name)
+                {
                     continue;
                 }
-                let requested = match self.protocol {
+                let requested = match self.config.clone_protocol {
                     CloneProtocol::Ssh => "ssh",
                     CloneProtocol::Https => "http",
                 };
@@ -84,7 +77,7 @@ impl BitbucketSource {
                     })?
                     .href;
                 discovered.push(RepoSpec {
-                    id: format!("{}/{}", self.name, name),
+                    id: format!("{}/{}", self.config.name, name),
                     canonical_url: canonicalize_remote(&clone_url)?,
                     clone_url,
                     default_branch: repo.default_branch.map(|branch| branch.display_id),
@@ -105,20 +98,20 @@ impl BitbucketSource {
     }
     pub(super) async fn discover(&self) -> Result<Vec<RepoSpec>> {
         let mut discovered = Vec::new();
-        if self.projects.is_empty() {
+        if self.config.projects.is_empty() {
             discovered.extend(
                 self.discover_url(format!(
                     "{}/rest/api/1.0/repos?limit=100&permission=REPO_READ",
-                    self.base_url
+                    self.config.base_url.trim_end_matches('/')
                 ))
                 .await?,
             );
         } else {
-            for project in &self.projects {
+            for project in &self.config.projects {
                 discovered.extend(
                     self.discover_url(format!(
                         "{}/rest/api/1.0/projects/{project}/repos?limit=100",
-                        self.base_url
+                        self.config.base_url.trim_end_matches('/')
                     ))
                     .await?,
                 );

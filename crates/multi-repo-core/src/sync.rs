@@ -198,9 +198,7 @@ fn reconcile_repositories(
 ) -> Result<Vec<RepoRecord>> {
     let mut desired_ids = BTreeSet::new();
     for (source, specs) in successful {
-        for repo in state.reconcile_source(&source, &specs, &config.repos_dir())? {
-            desired_ids.insert(repo.id);
-        }
+        desired_ids.extend(state.reconcile_source(&source, &specs, &config.repos_dir())?);
     }
     Ok(state
         .list(false)?

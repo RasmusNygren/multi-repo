@@ -1,7 +1,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use base64::Engine;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -396,9 +396,8 @@ fn run_grep(state: &State, args: &GrepArgs) -> multi_repo_core::Result<u8> {
             ColorChoice::Always => true,
             ColorChoice::Never => false,
         };
-    let output = Arc::new(Output::new(args.json, use_color, args.sort_path));
-    let callback_output = Arc::clone(&output);
-    let emit = move |event| callback_output.handle(event);
+    let output = Output::new(args.json, use_color, args.sort_path);
+    let emit = |event| output.handle(event);
     let search_stats = search(&repos, &options, &emit)?;
     output.finish()?;
     if search_stats.errors > 0 {
@@ -425,7 +424,6 @@ struct Output {
     color: bool,
     sort: bool,
     buffered: Mutex<Vec<SearchEvent>>,
-    stdout: Mutex<io::Stdout>,
     error: Mutex<Option<io::Error>>,
 }
 
@@ -436,7 +434,6 @@ impl Output {
             color,
             sort,
             buffered: Mutex::new(Vec::new()),
-            stdout: Mutex::new(io::stdout()),
             error: Mutex::new(None),
         }
     }
@@ -458,11 +455,7 @@ impl Output {
                 Err(_) => self.record_error(io::Error::other("output buffer lock poisoned")),
             }
         } else {
-            let result = self
-                .stdout
-                .lock()
-                .map_err(|_| io::Error::other("stdout lock poisoned"))
-                .and_then(|mut stdout| write_event(&mut *stdout, &event, self.json, self.color));
+            let result = write_event(&mut io::stdout().lock(), &event, self.json, self.color);
             if let Err(error) = result {
                 self.record_error(error);
             }
@@ -479,25 +472,17 @@ impl Output {
                 std::mem::take(&mut *buffered)
             };
             events.sort_by(compare_events);
-            let mut stdout = self
-                .stdout
-                .lock()
-                .map_err(|_| Error::Task("stdout lock poisoned".into()))?;
+            let mut stdout = io::stdout().lock();
             for event in &events {
-                if let Err(error) = write_event(&mut *stdout, event, self.json, self.color) {
+                if let Err(error) = write_event(&mut stdout, event, self.json, self.color) {
                     self.record_error(error);
                     break;
                 }
             }
         }
-        let mut stdout = self
-            .stdout
-            .lock()
-            .map_err(|_| Error::Task("stdout lock poisoned".into()))?;
-        if let Err(error) = stdout.flush() {
+        if let Err(error) = io::stdout().flush() {
             self.record_error(error);
         }
-        drop(stdout);
         let error = self
             .error
             .lock()

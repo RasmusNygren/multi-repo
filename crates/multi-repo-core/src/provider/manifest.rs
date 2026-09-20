@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use serde::Deserialize;
 
 use super::repository_specs;
@@ -7,42 +5,21 @@ use crate::config::{ManifestConfig, RepositoryConfig, resolve_repository_url};
 use crate::error::{Error, Result};
 use crate::model::RepoSpec;
 
-pub(super) struct ManifestSource {
-    name: String,
-    path: PathBuf,
-    default_tags: Vec<String>,
-}
-
-impl ManifestSource {
-    pub(super) fn new(config: &ManifestConfig) -> Self {
-        Self {
-            name: config.name.clone(),
-            path: config.path.clone(),
-            default_tags: config.tags.clone(),
-        }
+pub(super) fn discover(config: &ManifestConfig) -> Result<Vec<RepoSpec>> {
+    let contents = std::fs::read_to_string(&config.path).map_err(|source| Error::Read {
+        path: config.path.clone(),
+        source,
+    })?;
+    let mut manifest: Manifest = toml::from_str(&contents)?;
+    let base = config
+        .path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    for repository in &mut manifest.repos {
+        repository.url = resolve_repository_url(base, &repository.url)?;
     }
-
-    pub(super) fn discover(&self) -> Result<Vec<RepoSpec>> {
-        let contents = std::fs::read_to_string(&self.path).map_err(|source| Error::Read {
-            path: self.path.clone(),
-            source,
-        })?;
-        let mut manifest: Manifest = toml::from_str(&contents)?;
-        let base = self
-            .path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        for repository in &mut manifest.repos {
-            repository.url = resolve_repository_url(base, &repository.url)?;
-        }
-        let context = self.path.display().to_string();
-        repository_specs(
-            Some(&self.name),
-            &manifest.repos,
-            &self.default_tags,
-            &context,
-        )
-    }
+    let context = config.path.display().to_string();
+    repository_specs(Some(&config.name), &manifest.repos, &config.tags, &context)
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,14 +46,14 @@ mod tests {
             "[[repo]]\nid = \"acme/widget\"\nurl = \"../widget.git\"\ntags = [\"specific\"]\n",
         )
         .unwrap();
-        let source = ManifestSource::new(&ManifestConfig {
+        let config = ManifestConfig {
             name: "generated".into(),
             fetch_all_branches: false,
             path,
             tags: vec!["default".into()],
-        });
+        };
 
-        let repositories = source.discover().unwrap();
+        let repositories = discover(&config).unwrap();
 
         assert_eq!(repositories.len(), 1);
         assert_eq!(repositories[0].id, "generated/acme/widget");

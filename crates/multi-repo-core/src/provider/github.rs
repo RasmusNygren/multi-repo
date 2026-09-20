@@ -9,76 +9,51 @@ use crate::config::GitHubConfig;
 use crate::error::Result;
 use crate::model::{CloneProtocol, RepoSpec};
 
-pub(super) struct GitHubSource {
-    name: String,
-    api_url: String,
-    client: reqwest::Client,
-    protocol: CloneProtocol,
-    filters: Filters,
-    include_forks: bool,
-    include_archived: bool,
-    include_private: bool,
-    tags: BTreeSet<String>,
-}
-
-impl GitHubSource {
-    pub(super) fn new(config: &GitHubConfig) -> Result<Self> {
-        let token = config.access_token()?;
-        let headers = authenticated_headers(&token, "application/vnd.github+json", "GitHub")?;
-        Ok(Self {
-            name: config.name.clone(),
-            api_url: config.api_url.trim_end_matches('/').to_owned(),
-            client: reqwest::Client::builder()
-                .default_headers(headers)
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
-                .build()?,
-            protocol: config.clone_protocol,
-            filters: Filters::new(&config.include, &config.exclude)?,
-            include_forks: config.include_forks,
-            include_archived: config.include_archived,
-            include_private: config.include_private,
-            tags: config.tags.iter().cloned().collect(),
-        })
-    }
-
-    pub(super) async fn discover(&self) -> Result<Vec<RepoSpec>> {
-        let mut next = Some(format!(
-            "{}/user/repos?per_page=100&affiliation=owner,collaborator,organization_member",
-            self.api_url
-        ));
-        let mut discovered = Vec::new();
-        while let Some(url) = next.take() {
-            let response = self.client.get(&url).send().await?.error_for_status()?;
-            next = response
-                .headers()
-                .get(LINK)
-                .and_then(|value| value.to_str().ok())
-                .and_then(next_link);
-            let repos: Vec<GitHubRepo> = response.json().await?;
-            for repo in repos {
-                if (!self.include_forks && repo.fork)
-                    || (!self.include_archived && repo.archived)
-                    || (!self.include_private && repo.private)
-                    || !self.filters.matches(&repo.full_name)
-                {
-                    continue;
-                }
-                let clone_url = match self.protocol {
-                    CloneProtocol::Ssh => repo.ssh_url,
-                    CloneProtocol::Https => repo.clone_url,
-                };
-                discovered.push(RepoSpec {
-                    id: format!("{}/{}", self.name, repo.full_name),
-                    canonical_url: canonicalize_remote(&clone_url)?,
-                    clone_url,
-                    default_branch: Some(repo.default_branch),
-                    tags: self.tags.clone(),
-                });
+pub(super) async fn discover(config: &GitHubConfig) -> Result<Vec<RepoSpec>> {
+    let token = config.access_token()?;
+    let headers = authenticated_headers(&token, "application/vnd.github+json", "GitHub")?;
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let filters = Filters::new(&config.include, &config.exclude)?;
+    let tags: BTreeSet<String> = config.tags.iter().cloned().collect();
+    let mut next = Some(format!(
+        "{}/user/repos?per_page=100&affiliation=owner,collaborator,organization_member",
+        config.api_url.trim_end_matches('/')
+    ));
+    let mut discovered = Vec::new();
+    while let Some(url) = next.take() {
+        let response = client.get(&url).send().await?.error_for_status()?;
+        next = response
+            .headers()
+            .get(LINK)
+            .and_then(|value| value.to_str().ok())
+            .and_then(next_link);
+        let repos: Vec<GitHubRepo> = response.json().await?;
+        for repo in repos {
+            if (!config.include_forks && repo.fork)
+                || (!config.include_archived && repo.archived)
+                || (!config.include_private && repo.private)
+                || !filters.matches(&repo.full_name)
+            {
+                continue;
             }
+            let clone_url = match config.clone_protocol {
+                CloneProtocol::Ssh => repo.ssh_url,
+                CloneProtocol::Https => repo.clone_url,
+            };
+            discovered.push(RepoSpec {
+                id: format!("{}/{}", config.name, repo.full_name),
+                canonical_url: canonicalize_remote(&clone_url)?,
+                clone_url,
+                default_branch: Some(repo.default_branch),
+                tags: tags.clone(),
+            });
         }
-        Ok(discovered)
     }
+    Ok(discovered)
 }
 
 fn next_link(value: &str) -> Option<String> {
