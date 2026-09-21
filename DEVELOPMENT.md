@@ -31,7 +31,7 @@ cargo build --workspace --release --locked
 cargo package --workspace --locked
 ```
 
-The search smoke test can also be run against a configured workspace:
+Run the search smoke benchmark on synthetic repositories:
 
 ```console
 cargo run --release -p multi-repo-core --example search-smoke
@@ -55,87 +55,65 @@ reference in `README.md`, and the files under `examples/` in the same change.
 
 ## Publishing
 
-### Binary releases
+### Release configuration
 
-[`cargo-dist`](https://axodotdev.github.io/cargo-dist/) builds the `multi-repo`
-binary for macOS (Intel and Apple Silicon) and Linux (x86-64 and ARM64, using
-static musl builds). The generated `.github/workflows/release.yml` publishes
-archives, SHA-256 checksums, a shell installer, and source code to GitHub
-Releases only when manually triggered through **Actions → Release → Run
-workflow**. Pushing branches or tags does not publish. Binary archives have
-GitHub artifact attestations. Pull requests only validate the release plan;
-they do not publish.
-This workflow is independent of crates.io and needs no additional secrets
-beyond the automatic `GITHUB_TOKEN`.
-
-Install the pinned generator when changing release configuration:
+Binary releases use `cargo-dist`, configured in `dist-workspace.toml`. When
+changing it, install the pinned generator and regenerate the workflow:
 
 ```console
 cargo install cargo-dist --version 0.32.0 --locked
-```
-
-Edit `dist-workspace.toml`, then regenerate the workflow instead of editing it
-directly. Keep all GitHub Actions pinned to full commit hashes in
-`dist.github-action-commits`.
-
-```console
 dist generate
 dist generate --check
 dist plan
 dist build
 ```
 
-`dist build` builds for the local host and writes artifacts to `target/distrib/`
-without publishing. The full target matrix runs on GitHub when releasing.
+Keep action hashes in `dist.github-action-commits`; do not edit the generated
+workflow directly. `dist build` writes local-host artifacts to `target/distrib/`
+without publishing.
 
-To release:
+### Binary releases
 
-1. Update `workspace.package.version` in `Cargo.toml` and the CLI's
-   `multi-repo-core` dependency version together. Run `cargo check --workspace`
-   to update `Cargo.lock`, then run the validation checks above.
-2. Run `dist plan --tag v0.1.0`, substituting the exact version being released.
-   Commit the version changes and any regenerated workflow, push, and wait for
-   CI to pass on that commit.
-3. Open **Actions → Release → Run workflow**, select the branch containing the
-   tested commit, and set **Release Tag** to `v0.1.0` (or the version being
-   released). Click **Run workflow** to build and publish. The workflow builds
-   the selected branch's commit; the tag input names the release, not the source
-   revision. It creates the tag if it does not already exist. If using an
-   existing tag, ensure it points to that same commit.
+1. Update `workspace.package.version` and the CLI's `multi-repo-core`
+   dependency version together. Run `cargo check --workspace` to update
+   `Cargo.lock`, then run the validation checks above.
+2. Run `dist plan --tag v0.1.0`, using the release version. Commit, push, and
+   wait for CI to pass on that commit.
+3. Open **Actions → Release → Run workflow**, select the tested branch, and
+   set **Release Tag** to the matching version. The workflow must be on the
+   default branch for this control to appear.
 
-The workflow must be present on the default branch for **Run workflow** to
-appear. Leave **Release Tag** at its default `dry-run` to build and upload
-workflow artifacts for all four platforms without creating a tag or publishing
-a GitHub Release.
+The workflow releases the selected branch's commit. It creates the tag if
+missing; an existing tag must point to that commit. Prerelease tags such as
+`v0.2.0-rc.1` require the same prerelease version in Cargo. The workflow creates
+the GitHub Release after successful builds; do not pre-create it.
 
-The tag version must match the workspace version. Tags such as
-`v0.2.0-rc.1` produce prereleases and require that same prerelease version in
-the Cargo manifests. Watch the Release workflow for completion; it creates the
-release after the builds succeed. Do not pre-create a release for the tag.
-
-To verify a downloaded binary archive's provenance:
+Use **Release Tag** `dry-run` to build all four targets without publishing:
+macOS and Linux on x86-64 and ARM64 (Linux uses static musl builds). Releases
+include archives, checksums, a shell installer, source, and binary attestations.
+Verify an archive with:
 
 ```console
 gh attestation verify multi-repo-aarch64-apple-darwin.tar.gz --repo RasmusNygren/multi-repo
 ```
 
+Only manual dispatch publishes; pushes do not, and pull requests only check
+the plan. Binary releases use the automatic `GITHUB_TOKEN` and are independent
+of crates.io.
+
 ### crates.io
 
-Keep the workspace version and the CLI's `multi-repo-core` dependency version
-in sync. After running the validation checks, verify and publish the core crate
-first:
+After updating versions and running validation as above, publish the core first:
 
 ```console
 cargo publish -p multi-repo-core --locked --dry-run
 cargo publish -p multi-repo-core --locked
 ```
 
-Once that version is available on crates.io, verify and publish the CLI:
+Wait until that version is available on crates.io before verifying and
+publishing the CLI, whose packaged dependency resolves through the registry:
 
 ```console
 cargo publish -p multi-repo --locked --dry-run
 cargo publish -p multi-repo --locked
 ```
-
-The CLI's packaged dependency resolves through crates.io, so its standalone
-packaging and publish dry run require the core version to be available there.

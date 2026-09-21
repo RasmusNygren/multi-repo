@@ -146,25 +146,11 @@ directory is also the workspace root.
 Source names must be unique, must be a single safe path component, and cannot
 be `workspace`, which is reserved for directly declared repositories.
 
-Each source can opt into fetching every branch. If multiple active sources
-discover the same repository, all branches are fetched when any associated
-source enables the setting. Repositories declared directly with `[[repo]]`
-fetch only their default branch.
-
-To fetch all branches for a source, add this setting to its `[[source]]` table:
-
-```toml
-[[source]]
-name = "catalog"
-kind = "manifest"
-path = "repos.toml"
-fetch_all_branches = true
-```
-
-The next `multi-repo sync` fetches all remote branches as `origin/<branch>`
-and prunes remote-tracking branches deleted from `origin`. It still only
-fast-forwards a clean, checked-out default branch; local feature branches
-are not switched or updated.
+Set `fetch_all_branches = true` on a source to fetch all branches as
+`origin/<branch>` and prune deleted remote-tracking branches. If multiple
+active sources discover the same repository, enabling it on any source is
+enough. Direct `[[repo]]` entries fetch only their default branch. This setting
+does not change which working-tree branches sync may update.
 
 ### GitHub source
 
@@ -172,16 +158,8 @@ are not switched or updated.
 [[source]]
 name = "github"
 kind = "github"
-fetch_all_branches = false
-api_url = "https://api.github.com"
 token_env = "GITHUB_TOKEN"
-clone_protocol = "ssh"
 include = ["acme/*"]
-exclude = ["acme/archived-*"]
-include_forks = false
-include_archived = false
-include_private = true
-tags = ["github"]
 ```
 
 | Setting | Type | Required | Default | Description |
@@ -209,16 +187,9 @@ GitHub repositories receive IDs in the form
 [[source]]
 name = "bitbucket"
 kind = "bitbucket-server"
-fetch_all_branches = false
 base_url = "https://bitbucket.example.com"
 token_env = "BITBUCKET_TOKEN"
-clone_protocol = "ssh"
 projects = ["PLATFORM"]
-include = ["PLATFORM/*"]
-exclude = []
-include_archived = false
-tags = ["internal"]
-ca_bundle = "certificates/company-ca.pem"
 ```
 
 | Setting | Type | Required | Default | Description |
@@ -251,8 +222,6 @@ entries directly in `.multi-repo.toml` instead.
 name = "catalog"
 kind = "manifest"
 path = "repos.toml"
-fetch_all_branches = false
-tags = ["catalog"]
 ```
 
 | Setting | Type | Required | Default | Description |
@@ -313,80 +282,22 @@ and fetch authentication.
 ## Command reference
 
 All commands accept `--config PATH`. Run `multi-repo <command> --help` for the
-built-in reference.
+built-in option reference.
 
-### `sync`
+| Command | Purpose |
+| --- | --- |
+| `sync` | Discover repositories, clone, fetch, and safely fast-forward. |
+| `list` | Show active repositories; use `--all` to include inactive ones. |
+| `prune` | Remove inactive repositories that pass the safety checks above. |
+| `grep <PATTERN> [-- <PATH>...]` | Search active, successfully synchronized working trees. |
 
-Discovers configured repositories, updates the inventory, clones missing
-repositories, fetches existing ones, and performs safe fast-forwards.
+For `list` and `grep`, `--repo`, `--source`, and `--tag` filters combine with
+AND; repeated values within one category combine with OR.
 
-| Option | Default | Description |
-| --- | --- | --- |
-| `--dry-run` | off | Discover and show inventory changes without modifying state or working trees. |
-| `-j, --jobs <JOBS>` | `8` | Maximum concurrent Git operations. Values below one behave as one. |
-| `--color <WHEN>` | `auto` | Color dry-run changes: `auto`, `always`, or `never`. |
-
-### `list`
-
-Lists active repositories in the inventory.
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--repo <GLOB>` | all | Select repository IDs by glob. Repeat to match any supplied glob. |
-| `--source <NAME>` | all | Select repositories associated with a source. Repeat to match any supplied source. |
-| `--tag <TAG>` | all | Select repositories with a tag. Repeat to match any supplied tag. |
-| `--all` | off | Include inactive repositories. |
-| `--json` | off | Emit a JSON array instead of text. |
-
-Different filter categories are combined with AND; repeated values within one
-category are combined with OR.
-
-### `prune`
-
-Removes inactive repositories only when their working trees and local Git
-state are safe to delete.
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--dry-run` | off | Report what would be removed without changing files or state. |
-
-### `grep`
-
-Searches active, successfully synchronized repository working trees. The
-default output is `repository:path:line:column:text`.
-
-```text
-multi-repo grep [OPTIONS] <PATTERN> [-- <PATH>...]
-```
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--repo <GLOB>` | all | Select repository IDs by glob; repeat for OR matching. |
-| `--source <NAME>` | all | Select source names; repeat for OR matching. |
-| `--tag <TAG>` | all | Select tags; repeat for OR matching. |
-| `-F, --fixed-strings` | off | Treat the pattern as a literal string instead of a regular expression. |
-| `-i, --ignore-case` | off | Match case-insensitively. Conflicts with `--smart-case`. |
-| `-S, --smart-case` | off | Ignore case unless the pattern contains an uppercase literal. Conflicts with `--ignore-case`. |
-| `-w, --word` | off | Require word boundaries around matches. |
-| `-B, --before-context <NUM>` | `0` | Print `NUM` lines before each match. |
-| `-A, --after-context <NUM>` | `0` | Print `NUM` lines after each match. |
-| `-C, --context <NUM>` | — | Print `NUM` lines before and after each match; overrides `-A` and `-B`. |
-| `-g, --glob <GLOB>` | all | Include matching paths; prefix a glob with `!` to exclude paths. Repeatable. |
-| `-l, --files-with-matches` | off | Print only files containing matches. |
-| `--repos-with-matches` | off | Print only repositories containing matches. |
-| `-c, --count` | off | Print matching-line counts per file. |
-| `--json` | off | Emit JSON Lines. |
-| `--sort-path` | off | Buffer and sort output by repository and path. |
-| `--color <WHEN>` | `auto` | Color repository and path prefixes and highlight matches: `auto`, `always`, or `never`. |
-| `-j, --threads <THREADS>` | `0` | Search worker threads; zero selects the count automatically. |
-| `-- <PATH>...` | all | Search only these paths relative to every selected repository. |
-
-`--files-with-matches`, `--repos-with-matches`, and `--count` are mutually
-exclusive. Search includes dotfiles, respects Git and ripgrep ignore files,
-skips binary files, does not follow symlinks, and always excludes `.git`.
-
-The exit status is `0` when matches are found, `1` when no matches are found,
-and `2` on error.
+Search includes dotfiles, respects Git and ripgrep ignore files, skips binary
+files, does not follow symlinks, and excludes `.git`. Its default output is
+`repository:path:line:column:text`; `--json` emits JSON Lines. Search exits
+with `0` for matches, `1` for no matches, and `2` for errors.
 
 ## Workspace data
 
@@ -394,12 +305,3 @@ Repositories are stored under `<root>/repos/`. The transactional inventory,
 workspace lock, and temporary clones are stored under `<root>/.multi-repo/`.
 Incomplete clones are not moved into `repos/`. Only one mutating operation can
 run at a time, but search remains available during synchronization.
-
-## Development
-
-See [DEVELOPMENT.md](DEVELOPMENT.md) for contributor setup and validation
-commands.
-
-## License
-
-[MIT](LICENSE)
