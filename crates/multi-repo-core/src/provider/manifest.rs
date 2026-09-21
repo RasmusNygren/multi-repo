@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 use super::repository_specs;
-use crate::config::{ManifestConfig, RepositoryConfig, resolve_repository_url};
+use crate::config::{ManifestConfig, RepositoryConfig, parse_toml, resolve_repository_url};
 use crate::error::{Error, Result};
 use crate::model::RepoSpec;
 
@@ -10,7 +10,7 @@ pub(super) fn discover(config: &ManifestConfig) -> Result<Vec<RepoSpec>> {
         path: config.path.clone(),
         source,
     })?;
-    let mut manifest: Manifest = toml::from_str(&contents)?;
+    let mut manifest: Manifest = parse_toml(&contents)?;
     let base = config
         .path
         .parent()

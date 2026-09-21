@@ -20,8 +20,6 @@ pub enum Error {
     Http(#[from] reqwest::Error),
     #[error("invalid URL: {0}")]
     Url(#[from] url::ParseError),
-    #[error("invalid TOML: {0}")]
-    Toml(#[from] toml::de::Error),
     #[error("invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("state database error: {0}")]

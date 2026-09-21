@@ -183,7 +183,7 @@ impl Config {
             path: path.clone(),
             source,
         })?;
-        let file: ConfigFile = toml::from_str(&contents)?;
+        let file: ConfigFile = parse_toml(&contents)?;
 
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         let mut config = Self {
@@ -351,6 +351,23 @@ fn access_token(
     Ok(token)
 }
 
+pub(crate) fn parse_toml<T: serde::de::DeserializeOwned>(contents: &str) -> Result<T> {
+    toml::from_str(contents).map_err(|error| {
+        // Both source excerpts and parser messages can contain credentials.
+        let location = error
+            .span()
+            .and_then(|span| contents.get(..span.start))
+            .map_or_else(String::new, |prefix| {
+                let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+                let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+                format!(" at line {line}, column {column}")
+            });
+        Error::Config(format!(
+            "invalid TOML{location}; check syntax, field names, and value types"
+        ))
+    })
+}
+
 fn resolve_path(base: &Path, path: &Path) -> Result<PathBuf> {
     let expanded = if path == Path::new("~") {
         home_dir().ok_or_else(|| Error::Config("cannot determine home directory".into()))?
@@ -513,7 +530,7 @@ mod tests {
 
         let error = Config::load(Some(&path)).unwrap_err().to_string();
 
-        assert!(error.contains("unknown field `version`"));
+        assert!(error.contains("invalid TOML at line 1, column 1"));
     }
 
     #[test]

@@ -5,6 +5,41 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 #[test]
+fn toml_errors_do_not_expose_credentials() {
+    let temp = TempDir::new().unwrap();
+    let config = temp.path().join(".multi-repo.toml");
+    let manifest = temp.path().join("repos.toml");
+    for contents in [
+        "token = \"sensitive-token\" typo\n",
+        "token = \"sensitive-token\n",
+        "root = [\"sensitive-token\"]\n",
+        "\"sensitive-token\" = true\n",
+        "[[source]]\nname = \"github\"\nkind = \"sensitive-token\"\n",
+        "# Unicode before the error: é\ntoken = \"sensitive-token\" typo\n",
+    ] {
+        for external_manifest in [false, true] {
+            if external_manifest {
+                fs::write(
+                    &config,
+                    "[[source]]\nname = \"catalog\"\nkind = \"manifest\"\npath = \"repos.toml\"\n",
+                )
+                .unwrap();
+                fs::write(&manifest, contents).unwrap();
+            } else {
+                fs::write(&config, contents).unwrap();
+            }
+            let output = command(temp.path(), ["sync", "--dry-run"]);
+            assert_eq!(output.status.code(), Some(2));
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(stderr.contains("invalid TOML at line"), "{stderr}");
+            assert!(stderr.contains("column"), "{stderr}");
+            assert!(!stderr.contains("sensitive-token"), "{stderr}");
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("sensitive-token"));
+        }
+    }
+}
+
+#[test]
 fn fetch_all_branches_supports_new_and_existing_clones() {
     for all_branches_on_clone in [false, true] {
         for default_branch in ["", "default_branch = \"main\"\n"] {
