@@ -300,25 +300,47 @@ built-in option reference.
 | `grep <PATTERN> [-- <PATH>...]` | Search active, successfully synchronized working trees. |
 | `log` | Show commits from the fetched default branches of synchronized repositories. |
 
-For `list`, `grep`, and `log`, `--repo`, `--source`, and `--tag` filters combine with
-AND; repeated values within one category combine with OR.
+For `list`, `grep`, and `log`, `--repo`, `--source`, and `--tag` filters
+combine with AND; repeated values within one category combine with OR.
 
-Search includes dotfiles, respects Git and ripgrep ignore files, skips binary
-files, does not follow symlinks, and excludes `.git`. Its default output is
-`repository:path:line:column:text`; `--json` emits JSON Lines. Search exits
-with `0` for matches, `1` for no matches, and `2` for errors.
+`grep` searches every selected working tree and prefixes each match with its
+repository:
 
-`log` reads each repository's `origin/<default branch>` as of the last `sync`,
-so local commits and checked-out feature branches are not included. Commits
-from all repositories are merged and sorted by committer date, newest first.
-`--since` and `--until` filter by committer date and accept any date Git
-understands, such as `2026-09-01` or `"2 weeks ago"`; like `git log`, `--since`
-stops following history past commits older than the cutoff. Repeated `--author`
-or `--grep` patterns combine with OR. The default output is
-`date  repository  hash  author  subject`, with dates shown in the local time
-zone; `--json` emits one JSON Lines object per commit with full author and
-committer details. `log` exits with `0` when commits are shown, `1` when none
-match, and `2` if any repository could not be read.
+```console
+$ multi-repo grep 'TODO|FIXME'
+acme/api:src/orders.rs:42:8:    // TODO: paginate archived orders
+acme/web:src/pages/history.tsx:17:6:  // FIXME: handle time zones
+```
+
+- **Files searched:** dotfiles are included, Git and ripgrep ignore files are
+  respected, and binary files, symlinks, and `.git` are skipped.
+- **Output:** `repository:path:line:column:text` by default; `--json` emits
+  JSON Lines.
+- **Exit status:** `0` for matches, `1` for no matches, and `2` for errors.
+
+`log` merges commits from all selected repositories into one list, newest
+first:
+
+```console
+$ multi-repo log --since '1 week ago'
+2026-10-12 16:01  acme/web      9edf262  Ana Costa   Dark mode for settings page
+2026-10-11 17:17  acme/infra    739d45c  Priya Shah  Alert on queue backlog
+2026-10-10 18:37  acme/api      24aaeba  Ana Costa   Return 404 for archived orders
+```
+
+- **Commits shown:** each repository's `origin/<default branch>` as of the
+  last `sync`. Local commits and feature branches are not included.
+- **Dates:** sorting, `--since`, and `--until` all use the committer date.
+  Dates are shown in the local time zone and accept any format Git
+  understands, such as `2026-09-01` or `"2 weeks ago"`.
+- **Filters:** repeated `--author` or `--grep` patterns combine with OR.
+- **JSON:** `--json` emits one JSON Lines object per commit, including full
+  author and committer details.
+- **Exit status:** `0` when commits are shown, `1` when none match, and `2` if
+  any repository could not be read.
+
+Like `git log`, `--since` stops following history at the first commit older
+than the cutoff, so a newer commit behind it can be missed.
 
 ## Workspace data
 
