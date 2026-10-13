@@ -16,8 +16,8 @@ It can:
 
 ## Install
 
-Install [Git](https://git-scm.com/). Once the first binary release is published,
-install the latest release on macOS or Linux with:
+Install [Git](https://git-scm.com/), then install the latest release on macOS or
+Linux with:
 
 ```console
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/RasmusNygren/multi-repo/releases/latest/download/multi-repo-installer.sh | sh
@@ -27,7 +27,14 @@ Prebuilt archives and SHA-256 checksums for x86-64 and ARM64 are also available
 on the [releases page](https://github.com/RasmusNygren/multi-repo/releases).
 These installations do not require Rust.
 
-To build from source, install Rust 1.95 or newer, then run:
+To build from source, install Rust 1.95 or newer, then install the latest
+release from [crates.io](https://crates.io/crates/multi-repo):
+
+```console
+cargo install --locked multi-repo
+```
+
+To build the unreleased `main` branch instead, run:
 
 ```console
 cargo install --locked --git https://github.com/RasmusNygren/multi-repo multi-repo
