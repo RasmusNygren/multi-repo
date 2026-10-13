@@ -256,7 +256,7 @@ fn remote_default_branch(path: &Path) -> Result<Option<String>> {
     .and_then(|reference| reference.strip_prefix("origin/").map(str::to_owned)))
 }
 
-fn default_branch(repo: &RepoRecord) -> Result<Option<String>> {
+pub(crate) fn default_branch(repo: &RepoRecord) -> Result<Option<String>> {
     repo.default_branch.clone().map_or_else(
         || remote_default_branch(&repo.local_path),
         |branch| Ok(Some(branch)),
@@ -275,7 +275,7 @@ fn result(
     }
 }
 
-fn git_stdout<I, S>(path: &Path, args: I) -> Result<String>
+pub(crate) fn git_stdout<I, S>(path: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -292,7 +292,7 @@ where
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn git_optional_stdout<I, S>(path: &Path, args: I) -> Result<Option<String>>
+pub(crate) fn git_optional_stdout<I, S>(path: &Path, args: I) -> Result<Option<String>>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

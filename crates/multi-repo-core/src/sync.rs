@@ -607,7 +607,7 @@ mod tests {
         .await
         .unwrap();
         assert!(!report.failed());
-        assert!(state.list(false).unwrap().is_empty());
+        assert_eq!(state.list(false).unwrap(), []);
         assert_eq!(state.list(true).unwrap().len(), 4);
     }
 }

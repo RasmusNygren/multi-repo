@@ -430,7 +430,7 @@ mod tests {
     fn existing_inventory_can_be_read_without_creating_one() {
         let temp = TempDir::new().unwrap();
         let state_dir = temp.path().join("state");
-        assert!(State::list_existing(&state_dir).unwrap().is_empty());
+        assert_eq!(State::list_existing(&state_dir).unwrap(), []);
         assert!(!state_dir.exists());
 
         let state = State::initialize(&state_dir).unwrap();
