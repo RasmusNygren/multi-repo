@@ -1,4 +1,5 @@
 pub mod config;
+pub mod log;
 pub mod prune;
 pub mod search;
 pub mod sync;

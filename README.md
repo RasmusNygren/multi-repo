@@ -100,6 +100,14 @@ such as `vendor`, `.venv`, and `target` do not affect detection. Each language
 requires both a project marker and a matching source file: `go.mod` and `.go`,
 Python project metadata and `.py`, or `Cargo.toml` and `.rs`.
 
+Show recent commits from every repository as one timeline, newest first:
+
+```console
+multi-repo log --since 2026-09-01
+multi-repo log --since '2 weeks ago' --author alice --tag language:rust
+multi-repo log --since 2026-09-01 --until 2026-10-01 --json
+```
+
 Review repositories that disappeared from their source, then remove those that
 are safe to delete:
 
@@ -290,14 +298,27 @@ built-in option reference.
 | `list` | Show active repositories; use `--all` to include inactive ones. |
 | `prune` | Remove inactive repositories that pass the safety checks above. |
 | `grep <PATTERN> [-- <PATH>...]` | Search active, successfully synchronized working trees. |
+| `log` | Show commits from the fetched default branches of synchronized repositories. |
 
-For `list` and `grep`, `--repo`, `--source`, and `--tag` filters combine with
+For `list`, `grep`, and `log`, `--repo`, `--source`, and `--tag` filters combine with
 AND; repeated values within one category combine with OR.
 
 Search includes dotfiles, respects Git and ripgrep ignore files, skips binary
 files, does not follow symlinks, and excludes `.git`. Its default output is
 `repository:path:line:column:text`; `--json` emits JSON Lines. Search exits
 with `0` for matches, `1` for no matches, and `2` for errors.
+
+`log` reads each repository's `origin/<default branch>` as of the last `sync`,
+so local commits and checked-out feature branches are not included. Commits
+from all repositories are merged and sorted by committer date, newest first.
+`--since` and `--until` filter by committer date and accept any date Git
+understands, such as `2026-09-01` or `"2 weeks ago"`; like `git log`, `--since`
+stops following history past commits older than the cutoff. Repeated `--author`
+or `--grep` patterns combine with OR. The default output is
+`date  repository  hash  author  subject`, with dates shown in the local time
+zone; `--json` emits one JSON Lines object per commit with full author and
+committer details. `log` exits with `0` when commits are shown, `1` when none
+match, and `2` if any repository could not be read.
 
 ## Workspace data
 

@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
@@ -262,7 +262,7 @@ fn inline_repository_sync_list_and_working_tree_search() {
 
     let no_match = command(&nested, ["grep", "absent-literal"]);
     assert_eq!(no_match.status.code(), Some(1));
-    assert!(no_match.stdout.is_empty());
+    assert_eq!(no_match.stdout, b"");
 
     assert_search_buffering(&nested, &checkout);
     assert_prune_behavior(&workspace, &nested, &config, &checkout);
@@ -285,7 +285,7 @@ fn assert_search_buffering(directory: &Path, checkout: &Path) {
             .output()
             .unwrap();
         assert_success(&closed_pipe);
-        assert!(closed_pipe.stderr.is_empty());
+        assert_eq!(closed_pipe.stderr, b"");
 
         #[cfg(target_os = "linux")]
         {
@@ -353,7 +353,7 @@ fn assert_detected_language_changes(seed: &Path, nested: &Path) {
     assert!(String::from_utf8_lossy(&language.stdout).contains("acme/repo"));
     let other_language = command(nested, ["list", "--tag", "language:go"]);
     assert_success(&other_language);
-    assert!(other_language.stdout.is_empty());
+    assert_eq!(other_language.stdout, b"");
 
     fs::remove_file(seed.join("pyproject.toml")).unwrap();
     fs::remove_file(seed.join("src/service.py")).unwrap();
@@ -367,7 +367,7 @@ fn assert_detected_language_changes(seed: &Path, nested: &Path) {
 
     let old_language = command(nested, ["list", "--tag", "language:python"]);
     assert_success(&old_language);
-    assert!(old_language.stdout.is_empty());
+    assert_eq!(old_language.stdout, b"");
     let new_language = command(nested, ["list", "--tag", "language:go"]);
     assert_success(&new_language);
     assert!(String::from_utf8_lossy(&new_language.stdout).contains("acme/repo"));
@@ -386,7 +386,7 @@ fn assert_prune_behavior(workspace: &Path, nested: &Path, config: &Path, checkou
     assert!(String::from_utf8_lossy(&dry_sync.stdout).contains("  - acme/repo"));
     assert!(String::from_utf8_lossy(&command(nested, ["list"]).stdout).contains("acme/repo"));
     assert_success(&command(nested, ["sync"]));
-    assert!(command(nested, ["list"]).stdout.is_empty());
+    assert_eq!(command(nested, ["list"]).stdout, b"");
     let inactive = command(nested, ["list", "--all"]);
     assert_success(&inactive);
     assert!(String::from_utf8_lossy(&inactive.stdout).contains("acme/repo (inactive)"));
@@ -435,7 +435,7 @@ fn assert_prune_behavior(workspace: &Path, nested: &Path, config: &Path, checkou
     assert!(String::from_utf8_lossy(&prune.stdout).contains("acme/repo: deleted"));
     assert!(!checkout.exists());
     assert!(!workspace.join("repos").exists());
-    assert!(command(nested, ["list", "--all"]).stdout.is_empty());
+    assert_eq!(command(nested, ["list", "--all"]).stdout, b"");
 }
 
 #[cfg(unix)]
@@ -459,6 +459,151 @@ fn assert_prune_rejects_symlinks(workspace: &Path, nested: &Path, checkout: &Pat
         fs::remove_file(&path).unwrap();
         fs::rename(&outside, &path).unwrap();
     }
+}
+
+#[test]
+fn log_merges_default_branch_commits_by_committer_date() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    // A rebased commit is authored before, but committed after, --since.
+    let alpha = remote_with_commits(
+        temp.path(),
+        "alpha",
+        &[
+            (
+                "2026-01-01T12:00:00Z",
+                "2026-01-01T12:00:00Z",
+                "alpha initial",
+            ),
+            (
+                "2026-03-01T12:00:00Z",
+                "2026-03-01T12:00:00Z",
+                "alpha feature",
+            ),
+            (
+                "2025-12-01T12:00:00Z",
+                "2026-05-01T12:00:00Z",
+                "alpha rebased",
+            ),
+        ],
+    );
+    let beta = remote_with_commits(
+        temp.path(),
+        "beta",
+        &[
+            (
+                "2026-02-01T12:00:00Z",
+                "2026-02-01T12:00:00Z",
+                "beta initial",
+            ),
+            ("2026-04-01T12:00:00Z", "2026-04-01T12:00:00Z", "beta fix"),
+        ],
+    );
+    fs::write(
+        workspace.join(".multi-repo.toml"),
+        format!(
+            "[[repo]]\nid = \"acme/alpha\"\nurl = {:?}\n\n[[repo]]\nid = \"acme/beta\"\nurl = {:?}\n",
+            text(&alpha),
+            text(&beta)
+        ),
+    )
+    .unwrap();
+    assert_success(&command(&workspace, ["sync"]));
+
+    // Commits that only exist locally are not part of the fetched default branch.
+    let checkout = workspace.join("repos/acme/alpha");
+    git(&checkout, ["config", "user.name", "Test"]);
+    git(&checkout, ["config", "user.email", "test@example.com"]);
+    git(&checkout, ["commit", "--allow-empty", "-m", "alpha local"]);
+
+    let output = log_command(&workspace, ["log", "--since", "2026-02-15"]);
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{stdout}");
+    for (line, (date, repo, subject)) in lines.iter().zip([
+        ("2026-05-01 12:00", "acme/alpha", "alpha rebased"),
+        ("2026-04-01 12:00", "acme/beta ", "beta fix"),
+        ("2026-03-01 12:00", "acme/alpha", "alpha feature"),
+    ]) {
+        assert!(line.starts_with(&format!("{date}  {repo}  ")), "{line}");
+        assert!(line.ends_with(&format!("Test  {subject}")), "{line}");
+    }
+
+    let output = log_command(
+        &workspace,
+        [
+            "log",
+            "--since",
+            "2026-02-15",
+            "--until",
+            "2026-04-15",
+            "--repo",
+            "*/beta",
+            "--json",
+        ],
+    );
+    assert_success(&output);
+    let commits = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["repo"], "acme/beta");
+    assert_eq!(commits[0]["subject"], "beta fix");
+    assert_eq!(commits[0]["committer"]["date"], "2026-04-01T12:00:00Z");
+    assert_eq!(
+        commits[0]["hash"].as_str(),
+        git_revision(&beta, "main").as_deref()
+    );
+
+    let none = log_command(&workspace, ["log", "--since", "2030-01-01"]);
+    assert_eq!(none.status.code(), Some(1));
+    assert_eq!(none.stdout, b"");
+}
+
+/// Creates a bare remote whose `main` holds empty commits with the given
+/// author dates, committer dates, and subjects.
+fn remote_with_commits(parent: &Path, name: &str, commits: &[(&str, &str, &str)]) -> PathBuf {
+    let remote = parent.join(format!("{name}.git"));
+    let seed = parent.join(name);
+    git(
+        parent,
+        ["init", "--bare", "--initial-branch=main", text(&remote)],
+    );
+    git(parent, ["init", "--initial-branch=main", text(&seed)]);
+    git(&seed, ["config", "user.name", "Test"]);
+    git(&seed, ["config", "user.email", "test@example.com"]);
+    for (author_date, commit_date, subject) in commits {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&seed)
+            .args(["commit", "--allow-empty", "-m", subject])
+            .env("GIT_AUTHOR_DATE", author_date)
+            .env("GIT_COMMITTER_DATE", commit_date)
+            .output()
+            .unwrap();
+        assert_success(&output);
+    }
+    git(&seed, ["remote", "add", "origin", text(&remote)]);
+    git(&seed, ["push", "origin", "main"]);
+    remote
+}
+
+fn log_command<I, S>(directory: &Path, args: I) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    // Local commit dates are rendered in a fixed time zone.
+    Command::new(env!("CARGO_BIN_EXE_multi-repo"))
+        .current_dir(directory)
+        .env("TZ", "UTC")
+        .args(args)
+        .output()
+        .unwrap()
 }
 
 fn command<I, S>(directory: &Path, args: I) -> Output

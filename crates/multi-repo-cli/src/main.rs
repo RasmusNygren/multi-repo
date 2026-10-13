@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use base64::Engine;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use multi_repo_core::log::{Commit, LogOptions, log};
 use multi_repo_core::prune::{PruneAction, PruneOptions, prune};
 use multi_repo_core::search::{
     CaseMode, MatchEvent, PatternKind, RepoFilter, SearchEvent, SearchOptions, SearchOutputMode,
@@ -40,6 +41,8 @@ enum Command {
     Prune(PruneArgs),
     /// Search all selected repository working trees
     Grep(GrepArgs),
+    /// Show commits from every selected default branch, newest first
+    Log(LogArgs),
 }
 
 #[derive(Debug, Args)]
@@ -149,6 +152,33 @@ struct GrepArgs {
     paths: Vec<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+struct LogArgs {
+    #[command(flatten)]
+    filter: FilterArgs,
+    /// Show commits committed at or after DATE, e.g. 2026-09-01 or "2 weeks ago"
+    #[arg(long, value_name = "DATE")]
+    since: Option<String>,
+    /// Show commits committed at or before DATE
+    #[arg(long, value_name = "DATE")]
+    until: Option<String>,
+    /// Show commits whose author matches PATTERN; repeat for OR matching
+    #[arg(long, value_name = "PATTERN")]
+    author: Vec<String>,
+    /// Show commits whose message matches PATTERN; repeat for OR matching
+    #[arg(long, value_name = "PATTERN")]
+    grep: Vec<String>,
+    /// Emit JSON Lines
+    #[arg(long)]
+    json: bool,
+    /// Control colored repository and commit names
+    #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
+    color: ColorChoice,
+    /// Maximum concurrent Git operations
+    #[arg(short = 'j', long, default_value_t = default_jobs())]
+    jobs: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 enum ColorChoice {
     #[default]
@@ -179,6 +209,7 @@ async fn run() -> multi_repo_core::Result<u8> {
         Command::List(args) => run_list(&State::initialize(&config.state_dir())?, &args),
         Command::Prune(args) => run_prune(&config, &args),
         Command::Grep(args) => run_grep(&State::initialize(&config.state_dir())?, &args),
+        Command::Log(args) => run_log(&State::initialize(&config.state_dir())?, &args),
     }
 }
 
@@ -407,6 +438,103 @@ fn run_grep(state: &State, args: &GrepArgs) -> multi_repo_core::Result<u8> {
     } else {
         Ok(1)
     }
+}
+
+fn run_log(state: &State, args: &LogArgs) -> multi_repo_core::Result<u8> {
+    let repos = select_repos(state.searchable()?, &args.filter.as_filter())?;
+    let report = log(
+        &repos,
+        &LogOptions {
+            since: args.since.clone(),
+            until: args.until.clone(),
+            authors: args.author.clone(),
+            grep: args.grep.clone(),
+            jobs: args.jobs,
+        },
+    );
+    for error in &report.errors {
+        eprintln!("{}: {}", error.repo, error.message);
+    }
+    let color = !args.json
+        && match args.color {
+            ColorChoice::Auto => io::stdout().is_terminal(),
+            ColorChoice::Always => true,
+            ColorChoice::Never => false,
+        };
+    let mut stdout = io::BufWriter::new(io::stdout().lock());
+    write_commits(&mut stdout, &report.commits, args.json, color)
+        .and_then(|()| stdout.flush())
+        .map_err(|source| Error::Write {
+            path: PathBuf::from("<stdout>"),
+            source,
+        })?;
+    if report.failed() {
+        Ok(2)
+    } else if report.commits.is_empty() {
+        Ok(1)
+    } else {
+        Ok(0)
+    }
+}
+
+fn write_commits(
+    output: &mut dyn Write,
+    commits: &[Commit],
+    json_output: bool,
+    color: bool,
+) -> io::Result<()> {
+    if json_output {
+        for commit in commits {
+            serde_json::to_writer(&mut *output, &json_commit(commit))?;
+            output.write_all(b"\n")?;
+        }
+        return Ok(());
+    }
+    let width = |field: fn(&Commit) -> &str| {
+        commits
+            .iter()
+            .map(|commit| field(commit).chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let repo_width = width(|commit| &commit.repo);
+    let hash_width = width(|commit| &commit.short_hash);
+    let author_width = width(|commit| &commit.author_name);
+    for commit in commits {
+        let (repo_color, hash_color, reset) = if color {
+            ("\x1b[36m", "\x1b[33m", "\x1b[0m")
+        } else {
+            ("", "", "")
+        };
+        writeln!(
+            output,
+            "{}  {repo_color}{:<repo_width$}{reset}  {hash_color}{:<hash_width$}{reset}  {:<author_width$}  {}",
+            commit.local_commit_date,
+            commit.repo,
+            commit.short_hash,
+            commit.author_name,
+            commit.subject,
+        )?;
+    }
+    Ok(())
+}
+
+fn json_commit(commit: &Commit) -> Value {
+    json!({
+        "repo": commit.repo,
+        "hash": commit.hash,
+        "author": {
+            "name": commit.author_name,
+            "email": commit.author_email,
+            "date": commit.author_date,
+        },
+        "committer": {
+            "name": commit.committer_name,
+            "email": commit.committer_email,
+            "date": commit.commit_date,
+        },
+        "subject": commit.subject,
+    })
 }
 
 impl FilterArgs {
@@ -718,6 +846,44 @@ mod tests {
             "  \x1b[31m- github/acme/old\x1b[0m"
         );
         assert_eq!(repository_change_line(&added, false), "  + github/acme/new");
+    }
+
+    #[test]
+    fn commit_output_aligns_columns_and_colors_only_names() {
+        let commit = |repo: &str, short_hash: &str, author_name: &str| Commit {
+            repo: repo.into(),
+            hash: String::new(),
+            short_hash: short_hash.into(),
+            author_name: author_name.into(),
+            author_email: String::new(),
+            author_date: String::new(),
+            committer_name: String::new(),
+            committer_email: String::new(),
+            commit_date: String::new(),
+            commit_timestamp: 0,
+            local_commit_date: "2026-10-01 09:00".into(),
+            subject: "Fix it".into(),
+        };
+        let commits = [
+            commit("acme/api", "abc1234", "Zoë"),
+            commit("acme/web", "def45678", "Bob Smith"),
+        ];
+        let mut output = Vec::new();
+
+        write_commits(&mut output, &commits, false, false).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "2026-10-01 09:00  acme/api  abc1234   Zoë        Fix it\n\
+             2026-10-01 09:00  acme/web  def45678  Bob Smith  Fix it\n"
+        );
+
+        let mut output = Vec::new();
+        write_commits(&mut output, &commits[..1], false, true).unwrap();
+        assert_eq!(
+            output,
+            b"2026-10-01 09:00  \x1b[36macme/api\x1b[0m  \x1b[33mabc1234\x1b[0m  Zo\xc3\xab  Fix it\n"
+        );
     }
 
     #[test]
